@@ -165,9 +165,11 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
   std::ofstream draft_out(path("draft_argmax.i32"), std::ios::binary);
   std::ofstream ref_hidden;
   std::ofstream ref_argmax;
+  std::ofstream ref_mtp_logits;  // full vocab per position: torch parity gate
   if (have_ref) {
     ref_hidden.open(path("ref_hidden.f32"), std::ios::binary);
     ref_argmax.open(path("ref_mtp_argmax.i32"), std::ios::binary);
+    ref_mtp_logits.open(path("ref_mtp_logits.f32"), std::ios::binary);
   }
   if (!tokens_out || !hidden_out || !topk_ids || !topk_val || !lse_out ||
       !draft_out) {
@@ -253,6 +255,9 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
                                       ref_logits.begin());
         ref_argmax.write(reinterpret_cast<const char*>(&ref_arg),
                          sizeof(ref_arg));
+        ref_mtp_logits.write(
+            reinterpret_cast<const char*>(ref_logits.data()),
+            static_cast<std::streamsize>(ref_logits.size() * sizeof(float)));
       }
       ++positions;
     }
