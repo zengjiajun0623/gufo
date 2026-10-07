@@ -188,6 +188,16 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
     if (!session->Sync(std::span<const std::int32_t>(ids).first(1), &error)) {
       throw std::runtime_error("Sync failed: " + error);
     }
+    std::unique_ptr<q::ReferenceModel> ref;
+    std::vector<float> hc;
+    std::vector<float> ref_logits;
+    if (have_ref) {
+      ref = std::make_unique<q::ReferenceModel>(
+          *ref_weights, ref_ngram.get(),
+          static_cast<std::uint32_t>(ids.size()) + 1);
+      hc.resize(ref_weights->config.HcDim());
+      ref_logits.resize(ref_weights->config.vocab_size);
+    }
     json::Value entry = json::Value::object();
     entry["start"] = static_cast<double>(token_count);
     entry["len"] = static_cast<double>(ids.size());
@@ -226,19 +236,14 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
       draft_out.write(reinterpret_cast<const char*>(&gpu_argmax),
                       sizeof(gpu_argmax));
       if (have_ref) {
-        const std::uint32_t H = ref_weights->config.hidden_size;
-        std::vector<float> hc(ref_weights->config.HcDim());
-        q::ReferenceModel ref(*ref_weights, ref_ngram.get(),
-                              static_cast<std::uint32_t>(ids.size()) + 1);
-        if (!ref.Step(ids[j], {}, hc, &error)) {
+        if (!ref->Step(ids[j], {}, hc, &error)) {
           throw std::runtime_error("reference Step failed: " + error);
         }
         ref_hidden.write(reinterpret_cast<const char*>(hc.data()),
                          static_cast<std::streamsize>(hc.size() *
                                                       sizeof(float)));
-        std::vector<float> ref_logits(ref_weights->config.vocab_size);
-        if (!ref.MtpStep(ref_mtp, ids[j + 1], hc, ref_logits, nullptr, nullptr,
-                         &error)) {
+        if (!ref->MtpStep(ref_mtp, ids[j + 1], hc, ref_logits, nullptr, nullptr,
+                          &error)) {
           throw std::runtime_error("reference MtpStep failed: " + error);
         }
         const std::int32_t ref_arg =
