@@ -1,0 +1,318 @@
+// `gufo dump-hidden`: teacher-forced training-data dump for MTP draft-head
+// self-distillation. For every corpus position t (token stream x, position j
+// = 0..len-2):
+//   hidden row h[j]   — the trunk hyper-connection residual the MTP block
+//                       consumes as `hidden` (HcDim floats, written bf16)
+//   trunk next dist   — top-k (id, logp) + lse (same as `score`)
+//   draft argmax      — the GPU MTP head's greedy token for (h[j], x[j+1])
+//   target            — x[j+1]
+// With --reference, additionally runs the float32 CPU ReferenceModel over the
+// same texts and writes ref_hidden.f32 + ref_mtp_argmax.i32 for acceptance.
+
+#include <algorithm>
+#include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <memory>
+#include <optional>
+#include <numeric>
+#include <span>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "src/cli/score/score.hpp"
+#include "src/core/gguf_reader.hpp"
+#include "src/core/json.hpp"
+#include "src/models/qwen38_flash_next/engine.hpp"
+#include "src/models/qwen38_flash_next/ngram.hpp"
+#include "src/models/qwen38_flash_next/reference.hpp"
+#include "src/models/qwen38_flash_next/weights.hpp"
+
+namespace gufo::cli {
+namespace {
+
+namespace q = gufo::models::qwen38_flash_next;
+
+struct DumpOptions {
+  std::string model_path;
+  std::string mtp_path;
+  std::string corpus;
+  std::string out_dir{"dump"};
+  std::size_t context{8192};
+  std::size_t top_k{64};
+  std::size_t limit{0};
+  bool reference{false};
+};
+
+std::string ReadFile(const std::string& path) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) throw std::runtime_error("cannot open " + path);
+  return std::string{std::istreambuf_iterator<char>(in),
+                     std::istreambuf_iterator<char>()};
+}
+
+std::uint16_t ToBf16(float f) {
+  std::uint32_t u;
+  std::memcpy(&u, &f, sizeof(u));
+  std::uint16_t b = static_cast<std::uint16_t>(u >> 16);
+  const std::uint32_t frac = u & 0xFFFFu;
+  if (frac > 0x8000u || (frac == 0x8000u && (b & 1u) != 0u)) {
+    ++b;  // round to nearest even on the truncated half
+  }
+  return b;
+}
+
+void EmitTopK(std::ofstream& ids_out, std::ofstream& val_out,
+              std::span<const float> logits, std::size_t k, float lse) {
+  const std::size_t vocab = logits.size();
+  std::vector<std::uint32_t> idx(vocab);
+  std::iota(idx.begin(), idx.end(), 0u);
+  k = std::min(k, vocab);
+  std::partial_sort(idx.begin(), idx.begin() + static_cast<std::ptrdiff_t>(k),
+                    idx.end(), [&](std::uint32_t a, std::uint32_t b) {
+                      return logits[a] > logits[b];
+                    });
+  std::sort(idx.begin(), idx.begin() + static_cast<std::ptrdiff_t>(k),
+            [&](std::uint32_t a, std::uint32_t b) {
+              return logits[a] != logits[b] ? logits[a] > logits[b] : a < b;
+            });
+  for (std::size_t i = 0; i < k; ++i) {
+    const std::int32_t id = static_cast<std::int32_t>(idx[i]);
+    const float lp = logits[idx[i]] - lse;
+    ids_out.write(reinterpret_cast<const char*>(&id), sizeof(id));
+    val_out.write(reinterpret_cast<const char*>(&lp), sizeof(lp));
+  }
+}
+
+int RunDumpHiddenImpl(const DumpOptions& opt) {
+  if (opt.model_path.empty()) throw std::runtime_error("--model is required");
+  if (opt.mtp_path.empty()) throw std::runtime_error("--mtp-model is required");
+  if (opt.corpus.empty()) throw std::runtime_error("--corpus is required");
+
+  const auto corpus = json::parse(ReadFile(opt.corpus));
+  if (!corpus.is_array()) {
+    throw std::runtime_error("corpus must be a JSON array of strings");
+  }
+  std::vector<std::string> texts;
+  for (const auto& v : corpus.items()) {
+    if (v.is_string()) texts.push_back(v.str());
+  }
+  if (opt.limit != 0 && texts.size() > opt.limit) texts.resize(opt.limit);
+  if (texts.empty()) throw std::runtime_error("corpus has no strings");
+
+  std::string error;
+  auto model = q::Model::Load(
+      opt.model_path,
+      q::ModelOptions{
+          .max_context = static_cast<std::uint32_t>(opt.context),
+          .mtp_model_path = opt.mtp_path,
+          .max_draft_tokens = 7,
+      },
+      &error);
+  if (model == nullptr) {
+    throw std::runtime_error("Model::Load failed: " + error);
+  }
+  auto session = model->CreateSession(
+      gufo::core::SessionMode::kSpeculative,
+      static_cast<std::uint32_t>(opt.context), &error);
+  if (session == nullptr) {
+    throw std::runtime_error("CreateSession failed: " + error);
+  }
+
+  // Optional float32 CPU reference (slow; only for short acceptance texts).
+  std::unique_ptr<gufo::core::GgufReader> ref_reader;
+  std::optional<q::ModelWeights> ref_weights;
+  std::unique_ptr<q::NgramTable> ref_ngram;
+  q::MtpWeights ref_mtp;
+  bool have_ref = false;
+  if (opt.reference) {
+    ref_reader = gufo::core::GgufReader::OpenFile(opt.model_path, &error);
+    if (!ref_reader) throw std::runtime_error("reference open failed: " + error);
+    ref_weights = q::ModelWeights::Bind(*ref_reader, &error);
+    if (!ref_weights) throw std::runtime_error("reference bind failed: " + error);
+    const auto& c = ref_weights->config;
+    if (c.ple_layer >= 0) {
+      const auto& t = ref_weights->ple_table;
+      ref_ngram = q::NgramTable::Open(
+          ref_reader->GetMappedRegions()[t.shard].file_descriptor, t.file_offset,
+          t.rows, c.ple_head_dim, t.type, &error);
+      if (!ref_ngram) throw std::runtime_error("n-gram table failed: " + error);
+    }
+    std::unique_ptr<gufo::core::GgufReader> mtp_reader =
+        gufo::core::GgufReader::OpenFile(opt.mtp_path, &error);
+    if (!mtp_reader) throw std::runtime_error("mtp open failed: " + error);
+    auto mtp = q::MtpWeights::Bind(*mtp_reader, ref_weights->config, &error);
+    if (!mtp) throw std::runtime_error("mtp bind failed: " + error);
+    ref_mtp = std::move(*mtp);
+    have_ref = true;
+  }
+
+  std::filesystem::create_directories(opt.out_dir);
+  const auto path = [&](const char* name) {
+    return opt.out_dir + "/" + name;
+  };
+  std::ofstream tokens_out(path("tokens.i32"), std::ios::binary);
+  std::ofstream hidden_out(path("hidden.bf16"), std::ios::binary);
+  std::ofstream topk_ids(path("topk.bin"), std::ios::binary);
+  std::ofstream topk_val(path("topk_val.f32"), std::ios::binary);
+  std::ofstream lse_out(path("lse.f32"), std::ios::binary);
+  std::ofstream draft_out(path("draft_argmax.i32"), std::ios::binary);
+  std::ofstream ref_hidden;
+  std::ofstream ref_argmax;
+  if (have_ref) {
+    ref_hidden.open(path("ref_hidden.f32"), std::ios::binary);
+    ref_argmax.open(path("ref_mtp_argmax.i32"), std::ios::binary);
+  }
+  if (!tokens_out || !hidden_out || !topk_ids || !topk_val || !lse_out ||
+      !draft_out) {
+    throw std::runtime_error("cannot write outputs in " + opt.out_dir);
+  }
+
+  json::Value offsets = json::Value::array();
+  std::size_t positions = 0;
+  std::size_t token_count = 0;
+  const auto t0 = std::chrono::steady_clock::now();
+
+  for (std::size_t t = 0; t < texts.size(); ++t) {
+    auto ids = model->Tokenize(texts[t]);
+    if (ids.size() > opt.context - 1) ids.resize(opt.context - 1);
+    if (ids.size() < 2) {
+      std::cerr << "skip text " << t << " (too short)\n";
+      continue;
+    }
+    if (!session->Sync(std::span<const std::int32_t>(ids).first(1), &error)) {
+      throw std::runtime_error("Sync failed: " + error);
+    }
+    json::Value entry = json::Value::object();
+    entry["start"] = static_cast<double>(token_count);
+    entry["len"] = static_cast<double>(ids.size());
+    offsets.push_back(entry);
+    for (std::size_t j = 0; j + 1 < ids.size(); ++j) {
+      if (j > 0) {
+        if (!session->Evaluate(ids[j], &error)) {
+          throw std::runtime_error("Evaluate failed: " + error);
+        }
+      }
+      const auto logits = session->Logits();
+      if (logits.empty()) throw std::runtime_error("no logits at position");
+      float max_v = logits[0];
+      for (std::size_t v = 1; v < logits.size(); ++v) {
+        max_v = std::max(max_v, logits[v]);
+      }
+      double sum = 0.0;
+      for (float v : logits) sum += std::exp(static_cast<double>(v - max_v));
+      const float lse = max_v + static_cast<float>(std::log(sum));
+
+      const auto h = session->CopyLastHidden();
+      if (h.empty()) throw std::runtime_error("CopyLastHidden failed");
+      std::int32_t gpu_argmax = -1;
+      if (!session->DraftProbe(ids[j + 1], &gpu_argmax, &error)) {
+        throw std::runtime_error("DraftProbe failed: " + error);
+      }
+
+      tokens_out.write(reinterpret_cast<const char*>(&ids[j + 1]),
+                       sizeof(ids[j + 1]));
+      for (float v : h) {
+        const std::uint16_t b = ToBf16(v);
+        hidden_out.write(reinterpret_cast<const char*>(&b), sizeof(b));
+      }
+      EmitTopK(topk_ids, topk_val, logits, opt.top_k, lse);
+      lse_out.write(reinterpret_cast<const char*>(&lse), sizeof(lse));
+      draft_out.write(reinterpret_cast<const char*>(&gpu_argmax),
+                      sizeof(gpu_argmax));
+      if (have_ref) {
+        const std::uint32_t H = ref_weights->config.hidden_size;
+        std::vector<float> hc(ref_weights->config.HcDim());
+        q::ReferenceModel ref(*ref_weights, ref_ngram.get(),
+                              static_cast<std::uint32_t>(ids.size()) + 1);
+        if (!ref.Step(ids[j], {}, hc, &error)) {
+          throw std::runtime_error("reference Step failed: " + error);
+        }
+        ref_hidden.write(reinterpret_cast<const char*>(hc.data()),
+                         static_cast<std::streamsize>(hc.size() *
+                                                      sizeof(float)));
+        std::vector<float> ref_logits(ref_weights->config.vocab_size);
+        if (!ref.MtpStep(ref_mtp, ids[j + 1], hc, ref_logits, nullptr, nullptr,
+                         &error)) {
+          throw std::runtime_error("reference MtpStep failed: " + error);
+        }
+        const std::int32_t ref_arg =
+            static_cast<std::int32_t>(std::max_element(ref_logits.begin(),
+                                                       ref_logits.end()) -
+                                      ref_logits.begin());
+        ref_argmax.write(reinterpret_cast<const char*>(&ref_arg),
+                         sizeof(ref_arg));
+      }
+      ++positions;
+    }
+    token_count += ids.size();
+    if ((t + 1) % 5 == 0 || t + 1 == texts.size()) {
+      std::cerr << "dumped " << t + 1 << '/' << texts.size() << " texts, "
+                << positions << " positions\n";
+    }
+  }
+  const double seconds =
+      std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
+          .count();
+
+  std::ofstream offsets_out(path("offsets.json"), std::ios::binary);
+  offsets_out << offsets.dump() << "\n";
+  std::ofstream thr(path("throughput.json"), std::ios::binary);
+  thr << "{\"positions\":" << positions << ",\"seconds\":" << seconds << "}\n";
+  std::cout << "dumped " << positions << " positions (" << token_count
+            << " tokens) in " << seconds << " s -> " << opt.out_dir << '\n';
+  return 0;
+}
+
+}  // namespace
+
+int RunDumpHidden(std::span<const char* const> args) {
+  DumpOptions opt;
+  try {
+    for (std::size_t i = 0; i < args.size(); ++i) {
+      const std::string_view a = args[i];
+      auto need = [&](std::string_view name) -> std::string_view {
+        if (i + 1 >= args.size()) {
+          throw std::runtime_error(std::string(name) + " needs a value");
+        }
+        return args[++i];
+      };
+      if (a == "--model") {
+        opt.model_path = std::string(need(a));
+      } else if (a == "--mtp-model") {
+        opt.mtp_path = std::string(need(a));
+      } else if (a == "--corpus") {
+        opt.corpus = std::string(need(a));
+      } else if (a == "--out") {
+        opt.out_dir = std::string(need(a));
+      } else if (a == "--context") {
+        opt.context = std::stoul(std::string(need(a)));
+      } else if (a == "--top-k") {
+        opt.top_k = std::stoul(std::string(need(a)));
+      } else if (a == "--limit") {
+        opt.limit = std::stoul(std::string(need(a)));
+      } else if (a == "--reference") {
+        opt.reference = true;
+      } else if (a == "--help" || a == "-h") {
+        std::cout
+            << "Usage: gufo dump-hidden --model M.gguf --mtp-model T.gguf "
+               "--corpus texts.json --out DIR [--context 8192] [--top-k 64] "
+               "[--limit N] [--reference]\n";
+        return 0;
+      } else {
+        throw std::runtime_error("unknown argument: " + std::string(a));
+      }
+    }
+    return RunDumpHiddenImpl(opt);
+  } catch (const std::exception& e) {
+    std::cerr << "Error: " << e.what() << '\n';
+    return 1;
+  }
+}
+
+}  // namespace gufo::cli

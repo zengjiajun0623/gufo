@@ -41,6 +41,7 @@ void print_help(std::string_view program_name) {
       << "  chat           Start an interactive terminal conversation\n"
       << "  bench          Benchmark prompt processing and token generation\n"
       << "  score          Teacher-forced corpus scoring for quant gates\n"
+      << "  dump-hidden    Teacher-forced trunk hidden + draft probe dump\\n"
       << "  eval           Evaluate an OpenAI-compatible text server\n"
       << "  video          Generate MiniMax H3 text-to-video\n"
       << "  transcribe     Transcribe WAV audio with Qwen3-ASR-1.7B\n"
@@ -138,6 +139,9 @@ int run(std::span<const char* const> args) {
   }
   if (first_arg == "score") {
     return gufo::cli::RunScore(options.subspan(1));
+  }
+  if (first_arg == "dump-hidden") {
+    return gufo::cli::RunDumpHidden(options.subspan(1));
   }
 
   if (first_arg == "eval") {

@@ -10,6 +10,7 @@ namespace gufo::cli {
 /// logsumexp, the argmax and the log-probability of the actual next token.
 /// Used to gate quantization changes (top-1 agreement, truncated KL).
 int RunScore(std::span<const char* const> args);
+int RunDumpHidden(std::span<const char* const> args);
 
 }  // namespace gufo::cli
 

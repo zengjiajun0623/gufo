@@ -517,6 +517,34 @@ bool Session::DraftReplay(std::int32_t next_token,
   return true;
 }
 
+std::vector<float> Session::CopyLastHidden() {
+  const Config& c = model_->weights_->config;
+  if (tokens_.empty()) {
+    return {};
+  }
+  const std::size_t hc = static_cast<std::size_t>(c.HcDim());
+  const std::size_t row = tokens_.size() - 1 - hidden_base_;
+  std::vector<float> window((row + 1) * hc);
+  if (!model_->executor_->CopyTrunkHidden(*session_, window, nullptr)) {
+    return {};
+  }
+  return std::vector<float>(window.end() - static_cast<std::ptrdiff_t>(hc),
+                            window.end());
+}
+
+bool Session::DraftProbe(std::int32_t next_token, std::int32_t* draft_argmax,
+                         std::string* error_msg) {
+  if (draft_argmax == nullptr) {
+    AssignError(error_msg, "draft argmax output pointer is null");
+    return false;
+  }
+  if (!DraftCatchUp(next_token, true, error_msg)) {
+    return false;
+  }
+  *draft_argmax = draft_token_;
+  return true;
+}
+
 bool Session::DraftCatchUp(std::int32_t next_token, bool propose,
                            std::string* error_msg,
                            MtpCandidateLogits* candidates) {

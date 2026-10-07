@@ -182,6 +182,7 @@ endif()
 add_library(gufo_llm_cli STATIC
   src/cli/bench/bench.cpp
   src/cli/score/score.cpp
+  src/cli/score/dump_hidden.cpp
   src/cli/prompt/prompt.cpp)
 target_link_libraries(gufo_llm_cli PUBLIC gufo_core)
 if(ENGINE_ENABLE_HIP)

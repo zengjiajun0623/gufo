@@ -170,6 +170,15 @@ public:
   [[nodiscard]] std::span<const float> Logits() const noexcept {
     return valid_ ? std::span<const float>(logits_) : std::span<const float>{};
   }
+  /// Copies the [HcDim] trunk hyper-connection residual produced by the last
+  /// Evaluate/Sync call (the row the MTP block consumes as `hidden`).
+  /// Returns an empty vector on failure.
+  [[nodiscard]] std::vector<float> CopyLastHidden();
+  /// Runs the MTP draft block for `next_token` against that residual row and
+  /// reports the GPU draft head's greedy token in `*draft_argmax`.
+  [[nodiscard]] bool DraftProbe(std::int32_t next_token,
+                                std::int32_t* draft_argmax,
+                                std::string* error_msg);
   [[nodiscard]] std::uint32_t Position() const noexcept;
   [[nodiscard]] std::uint32_t ContextSize() const noexcept;
   [[nodiscard]] std::span<const std::int32_t> Tokens() const noexcept {
