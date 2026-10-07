@@ -318,6 +318,8 @@ private:
                 Q8Input* q, std::string* error_msg) const;
   bool Dense(const DeviceTensor& w, const Q8Input& q, float* out,
              std::string* error_msg) const;
+  bool QuantDense(const DeviceTensor& w, const float* x, float* out,
+                  std::uint32_t n_tokens, std::string* error_msg) const;
   bool Dense(const DeviceTensor& w, const float* x, float* out,
              std::uint32_t n_tokens, std::string* error_msg) const;
   /// out = (up . x) * silu(gate . x); s_.shexp_gate is scratch.
@@ -473,6 +475,7 @@ private:
     std::int32_t* rows_token;
     std::int32_t* rows_slot;
     std::int32_t* routed_tiles;  ///< (expert | tile << 16) per launched tile
+    std::int32_t* zero_ids;  ///< max_batch zeros: dense K-quant as expert 0
     float* weights;
     float* gate_e;
     float* up_e;

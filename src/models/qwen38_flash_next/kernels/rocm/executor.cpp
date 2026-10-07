@@ -55,6 +55,11 @@ T* Alloc(std::vector<void*>& allocations, std::size_t count,
   return static_cast<T*>(p);
 }
 
+bool RoutedQuant(GgmlType type) {
+  return type == GgmlType::kQ4_K || type == GgmlType::kQ5_K ||
+         type == GgmlType::kQ5_1 || type == GgmlType::kQ4_1;
+}
+
 WeightType SmallType(GgmlType type) {
   switch (type) {
     case GgmlType::kBF16:
@@ -411,6 +416,7 @@ std::unique_ptr<Executor> Executor::Create(const DeviceModel& model,
     s.routed_tiles =
         Alloc<std::int32_t>(a, 3 * RoutedTileCapacity(slots, c), error_msg);
   }
+  s.zero_ids = Alloc<std::int32_t>(a, T, error_msg);  // Alloc zero-fills
   s.weights = f32(slots);
   s.gate_e = f32(slots * c.expert_ff);
   s.up_e = f32(slots * c.expert_ff);
@@ -727,6 +733,20 @@ bool Executor::Dense(const DeviceTensor& w, const Q8Input& q, float* out,
     }
     return true;
   }
+  if (RoutedQuant(w.type) && q.data != nullptr) {
+    if (w.cols != q.k) {
+      AssignError(error_msg, "quantized input width mismatch");
+      return false;
+    }
+    if (qfn_mmq_kq_dense_vec_preq(static_cast<int>(w.type), w.data, nullptr,
+                                  q.data, out, static_cast<int>(w.rows),
+                                  static_cast<int>(q.n),
+                                  static_cast<int>(w.cols), stream_) != 0) {
+      AssignError(error_msg, "dense K-quant GEMV failed");
+      return false;
+    }
+    return true;
+  }
   return Dense(w, q.x, out, q.n, error_msg);
 }
 
@@ -748,6 +768,22 @@ bool Executor::GatedDense(const DeviceTensor& up, const DeviceTensor& gate,
                                     static_cast<int>(n_tokens),
                                     static_cast<int>(up.cols), stream_) != 0) {
       AssignError(error_msg, "gated Q8_0 GEMV failed");
+      return false;
+    }
+    return true;
+  }
+  if (!MatrixRows(n_tokens) && RoutedQuant(up.type) && up.type == gate.type &&
+      up.rows == gate.rows && up.cols == gate.cols) {
+    Q8Input xq;
+    if (!Quantize(x, n_tokens, up.cols, &xq, error_msg)) {
+      return false;
+    }
+    if (qfn_mmq_kq_dense_vec_preq(static_cast<int>(up.type), up.data,
+                                  gate.data, xq.data, out,
+                                  static_cast<int>(up.rows),
+                                  static_cast<int>(n_tokens),
+                                  static_cast<int>(up.cols), stream_) != 0) {
+      AssignError(error_msg, "gated dense K-quant GEMV failed");
       return false;
     }
     return true;
@@ -805,8 +841,76 @@ bool Executor::DenseF16Route(const DeviceTensor& w,
          w.cols <= model_->max_half_cols();
 }
 
+/// A dense K-quant matrix runs as a one-expert routed projection: every row
+/// maps to expert 0, so the routed Q4_K/Q5_K/Q5_1 kernels read it directly.
+bool Executor::QuantDense(const DeviceTensor& w, const float* x, float* out,
+                          std::uint32_t n_tokens,
+                          std::string* error_msg) const {
+  const int M = static_cast<int>(w.rows);
+  const int K = static_cast<int>(w.cols);
+  const std::uint32_t piece = options_.max_batch;
+  for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += piece) {
+    const std::uint32_t n = std::min(piece, n_tokens - r0);
+    const float* xs = x + static_cast<std::size_t>(r0) * w.cols;
+    float* os = out + static_cast<std::size_t>(r0) * w.rows;
+    int rc = -1;
+    if (!MatrixRows(n)) {
+      rc = qfn_mmq_moe_vec(static_cast<int>(w.type), w.data, xs, s_.zero_ids,
+                           os, M, K, static_cast<int>(n), 1, 1, stream_);
+    } else {
+      qfn_mmq_set_routed_max_expert_rows(static_cast<int>(n));
+      qfn_mmq_set_routed_tile_cols(RoutedTileCols(n, 1, 1));
+      const int T = static_cast<int>(n);
+      switch (w.type) {
+        case GgmlType::kQ4_K:
+          rc = qfn_mmq_q4_K_moe_raw(w.data, xs, s_.zero_ids, os, M, K, T, 1, 1,
+                                    stream_);
+          break;
+        case GgmlType::kQ5_K:
+          rc = qfn_mmq_q5_K_moe_raw(w.data, xs, s_.zero_ids, os, M, K, T, 1, 1,
+                                    stream_);
+          break;
+        case GgmlType::kQ4_1:
+          rc = qfn_mmq_q4_1_moe_raw(w.data, xs, s_.zero_ids, os, M, K, T, 1, 1,
+                                    stream_);
+          break;
+        case GgmlType::kQ5_1:
+          rc = qfn_mmq_q5_1_moe_raw(w.data, xs, s_.zero_ids, os, M, K, T, 1, 1,
+                                    stream_);
+          break;
+        default:
+          break;
+      }
+    }
+    if (rc != 0) {
+      AssignError(error_msg, "dense K-quant projection failed");
+      return false;
+    }
+  }
+  return true;
+}
+
 bool Executor::Dense(const DeviceTensor& w, const float* x, float* out,
                      std::uint32_t n_tokens, std::string* error_msg) const {
+  if (RoutedQuant(w.type)) {
+    // Decode and verification (up to 64 rows: MTP catch-up and folded
+    // streams) stay on the vector kernel in chunks of eight; only prefill
+    // takes the routed GEMM.
+    if (!prefill_phase && n_tokens <= 8 * kVecBatch) {
+      for (std::uint32_t r0 = 0; r0 < n_tokens; r0 += kVecBatch) {
+        const std::uint32_t n = std::min(kVecBatch, n_tokens - r0);
+        Q8Input q;
+        if (!Quantize(x + static_cast<std::size_t>(r0) * w.cols, n, w.cols, &q,
+                      error_msg) ||
+            !Dense(w, q, out + static_cast<std::size_t>(r0) * w.rows,
+                   error_msg)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    return QuantDense(w, x, out, n_tokens, error_msg);
+  }
   if (w.type == GgmlType::kQ8_0) {
     if (!MatrixRows(n_tokens)) {
       Q8Input q;

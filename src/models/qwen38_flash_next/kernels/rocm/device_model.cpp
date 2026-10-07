@@ -72,7 +72,10 @@ struct Uploader {
     if (t.type == core::GgmlType::kBF16 || t.type == core::GgmlType::kF16) {
       max_half_cols = std::max<std::size_t>(max_half_cols, t.cols);
     }
-    if (t.type == core::GgmlType::kQ8_0 && t.experts == 1) {
+    if ((t.type == core::GgmlType::kQ8_0 || t.type == core::GgmlType::kQ4_K ||
+         t.type == core::GgmlType::kQ5_K || t.type == core::GgmlType::kQ5_1 ||
+         t.type == core::GgmlType::kQ4_1) &&
+        t.experts == 1) {
       max_q8_cols = std::max<std::size_t>(max_q8_cols, t.cols);
     }
     return d;
@@ -131,8 +134,10 @@ struct Uploader {
     const core::GgmlType type = (*parts.begin())->type;
     for (const TensorRef* t : parts) {
       if (t->empty() || t->type != type || t->cols != (*parts.begin())->cols ||
-          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0)) {
-        Fail("stacked upload needs F32 or Q8_0 tensors of one shape");
+          (type != core::GgmlType::kF32 && type != core::GgmlType::kQ8_0 &&
+           type != core::GgmlType::kQ4_K && type != core::GgmlType::kQ5_K &&
+           type != core::GgmlType::kQ4_1)) {
+        Fail("stacked upload needs F32, Q8_0, Q4_K or Q5_K tensors of one shape");
         return d;
       }
       rows += t->rows;
@@ -154,7 +159,9 @@ struct Uploader {
       }
       offset += t->SizeBytes();
     }
-    if (type == core::GgmlType::kQ8_0) {
+    if (type != core::GgmlType::kF32) {
+      // Quantized rows are self-contained blocks, so a stack is a plain
+      // concatenation (gufo-opt: K-quant stacks run as one dense GEMV).
       (void)hipMemsetAsync(static_cast<std::uint8_t*>(ptr) + size, 0,
                            kTailMargin, nullptr);
       d.data = ptr;
@@ -199,7 +206,10 @@ struct Uploader {
     // quantization allows; otherwise they stay separate.
     const auto stackable = [](std::initializer_list<const TensorRef*> parts) {
       for (const TensorRef* t : parts) {
-        if (t->empty() || t->type != core::GgmlType::kQ8_0 ||
+        const auto type = (*parts.begin())->type;
+        if (t->empty() || t->type != type ||
+            (type != core::GgmlType::kQ8_0 && type != core::GgmlType::kQ4_K &&
+             type != core::GgmlType::kQ5_K && type != core::GgmlType::kQ4_1) ||
             t->cols != (*parts.begin())->cols) {
           return false;
         }

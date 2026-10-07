@@ -25,6 +25,8 @@ struct Format {
       return {1, 2};
     case GgmlType::kQ8_0:
       return {32, 34};
+    case GgmlType::kQ4_1:
+      return {32, 20};
     case GgmlType::kQ5_1:
       return {32, 24};
     case GgmlType::kIQ4_NL:
@@ -120,10 +122,14 @@ struct Binder {
     m.norm = Get(prefix + "_norm.weight", hc_dim, 1, 1, {GgmlType::kF32});
     m.down =
         Get(prefix + "_down.weight", hc_dim, c.hc_low_rank, 1,
-            {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32});
+            {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32,
+             GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ5_1,
+             GgmlType::kQ4_1});
     m.up =
         Get(prefix + "_up.weight", c.hc_low_rank, hc_dim, 1,
-            {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32});
+            {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16, GgmlType::kF32,
+             GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ5_1,
+             GgmlType::kQ4_1});
     if (with_inject) {
       m.inject = Get(prefix + "_inject.weight", hc_dim, c.hc_count, 1,
                      {GgmlType::kF32, GgmlType::kQ8_0, GgmlType::kBF16});
@@ -139,7 +145,8 @@ struct Binder {
     const std::uint64_t hidden = c.hidden_size;
     const std::uint64_t hc_dim = c.HcDim();
     const auto dense = {GgmlType::kQ8_0, GgmlType::kBF16, GgmlType::kF16,
-                        GgmlType::kF32};
+                        GgmlType::kF32, GgmlType::kQ4_K, GgmlType::kQ5_K,
+                        GgmlType::kQ5_1, GgmlType::kQ4_1};
     const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
                           GgmlType::kQ5_1, GgmlType::kQ8_0};
 
@@ -249,7 +256,8 @@ std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,
   w.config = *config;
   const Config& c = w.config;
   const auto dense = {GgmlType::kQ8_0, GgmlType::kQ6_K, GgmlType::kBF16,
-                      GgmlType::kF16, GgmlType::kF32};
+                      GgmlType::kF16,  GgmlType::kF32, GgmlType::kQ4_K,
+                      GgmlType::kQ5_K, GgmlType::kQ4_1};
 
   {
     // The vocabulary is the embedding row count; no metadata key carries it.

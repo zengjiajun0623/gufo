@@ -56,6 +56,13 @@ int qfn_mmq_q8_0_dense_vec_preq(const void* W_q8_0, const void* W_gate,
                                 const void* X_q8, float* out_f32, int M, int N,
                                 int K, hipStream_t stream);
 
+// gufo-opt: dense Q4_K/Q5_K/Q5_1 for 1-8 pre-quantized inputs (same q8_1
+// layout as qfn_mmq_q8_0_dense_vec_preq); W_gate fuses up * silu(gate).
+int qfn_mmq_kq_dense_vec_preq(int weight_type, const void* W,
+                              const void* W_gate, const void* X_q8,
+                              float* out_f32, int M, int N, int K,
+                              hipStream_t stream);
+
 int qfn_mmq_build_ids_maps(
         const int32_t * ids, int32_t * ids_src1, int32_t * ids_dst, int32_t * expert_bounds,
         int n_experts, int n_tokens, int n_expert_used, int nchannels_y, int si1, int sis1, hipStream_t stream);
@@ -71,6 +78,11 @@ int qfn_mmq_q4_K_moe_raw(
     hipStream_t stream);
 
 int qfn_mmq_q5_1_moe_raw(
+    const void * W, const float * X_f32, const int32_t * ids, float * out,
+    int M, int K, int n_tokens, int n_experts, int n_expert_used,
+    hipStream_t stream);
+
+int qfn_mmq_q4_1_moe_raw(
     const void * W, const float * X_f32, const int32_t * ids, float * out,
     int M, int K, int n_tokens, int n_experts, int n_expert_used,
     hipStream_t stream);
