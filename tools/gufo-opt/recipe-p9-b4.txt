@@ -1,0 +1,3 @@
+# P9 b4: b3 recipe (gate/up IQ4_K, down Q5_1) with the UNSLOTH imatrix
+ffn_(gate|up)_exps\.weight IQ4_K
+ffn_down_exps\.weight Q5_1

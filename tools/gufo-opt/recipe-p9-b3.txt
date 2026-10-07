@@ -1,0 +1,3 @@
+# P9 b3: a2 trunk + routed gate/up IQ4_K, down Q5_1 (both requantized from Q8_0 with imatrix)
+ffn_(gate|up)_exps\.weight IQ4_K
+ffn_down_exps\.weight Q5_1

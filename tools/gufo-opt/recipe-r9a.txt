@@ -1,0 +1,10 @@
+# gufo-opt r9a: r8 + output head in Q4_1 (verify-friendly). Use with --imatrix.
+attn_output\.weight   Q8_0
+^output\.weight       Q4_1
+token_embd            KEEP
+ple_                  KEEP
+hc_                   KEEP
+shexp                 KEEP
+_exps                 KEEP
+attn_(qkv|q|k|v|gate)\.weight  Q4_1
+ssm_out\.weight       Q4_1

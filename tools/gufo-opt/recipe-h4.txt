@@ -1,0 +1,2 @@
+# h4: only the output head at Q4_K (isolates head vs trunk effect on MTP acceptance)
+^output\.weight       Q4_K

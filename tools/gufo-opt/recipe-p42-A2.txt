@@ -1,0 +1,16 @@
+# p42-A2 (specs/p4-2-sensitivity.md): r8 with ONE change: ssm_out\.weight KEEP  (ssm_out back to Q8_0).
+# Extra rule FIRST: first match wins. Build with --imatrix imat/base.imatrix.dat
+# from the base UD-Q4_K_XL shards, exactly like r8.
+ssm_out\.weight KEEP
+# ---- r8 recipe below, unchanged ----
+# gufo-opt r8: r6 layout with the trunk in Q4_1 (simple 32-blocks, Q8-like kernel cost). Use with --imatrix.
+# small/odd shapes stay Q8_0 on gufo's tuned kernels. Use with --imatrix.
+attn_output\.weight   Q8_0   # o_proj
+^output\.weight       Q4_K   # head (also read by every MTP draft step)
+token_embd            KEEP
+ple_                  KEEP
+hc_                   KEEP   # 320-row / K=320 mixers: tuned Q8 kernels win
+shexp                 KEEP   # 640-row shared expert: tuned gated Q8 kernel wins
+_exps                 KEEP
+attn_(qkv|q|k|v|gate)\.weight  Q4_1   # stacked into 16384 / 13312-row GEMVs
+ssm_out\.weight       Q4_1

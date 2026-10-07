@@ -1,0 +1,12 @@
+# gufo-opt recipe r1: halogen-v2-like dense trunk. First match wins.
+attn_output\.weight   Q8_0   # o_proj: halogen measured nearly all non-expert loss here
+^output\.weight       Q5_K   # head, shared by the MTP draft step
+token_embd            KEEP
+ple_                  KEEP
+hc_.*_down\.weight    Q5_K   # mixing layers, 6-bit-ish
+hc_.*_up\.weight      Q5_1   # K=320, not a 256 multiple
+ffn_down_shexp        Q5_1   # K=640
+_exps                 KEEP
+attn_(qkv|q|k|v|gate)\.weight  Q4_K
+ssm_out\.weight       Q4_K
+ffn_(gate|up)_shexp   Q4_K

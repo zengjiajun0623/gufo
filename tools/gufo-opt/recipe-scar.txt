@@ -1,0 +1,6 @@
+# MTP Q4_K_M sidecar -> gufo-whitelist-compliant: only tensors gufo rejects go Q8_0.
+blk\.48\.nextn\.hc_head_up\.weight    Q8_0
+blk\.48\.hc_(attn|ffn)_up\.weight     Q8_0
+blk\.48\.hc_(attn|ffn)_inject\.weight Q8_0
+blk\.48\.hc_ffn_down\.weight          Q8_0
+blk\.48\.attn_v\.weight               Q8_0
