@@ -1,0 +1,2 @@
+# P9 b6: only a2 Q4_K routed gate/up -> IQ4_K (same bytes); UD dynamic layers (Q5_K/Q8_0) and all down kept
+ffn_(gate|up)_exps\.weight IQ4_K@Q4_K

@@ -1,0 +1,3 @@
+# P9 b5: gate/up IQ4_K, down IQ4_NL, UNSLOTH imatrix
+ffn_(gate|up)_exps\.weight IQ4_K
+ffn_down_exps\.weight IQ4_NL

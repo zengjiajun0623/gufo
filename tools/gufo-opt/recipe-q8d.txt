@@ -1,0 +1,7 @@
+# P4-3: every trainable dense MTP tensor that is still Q4_K -> Q8_0, so trained deltas survive export
+# (Q4_K requant snapped smoke weights back to the grid: agree 0.873 state -> 0.693 export, base 0.657).
+blk\.48\.nextn\.eh_proj\.weight        Q8_0
+blk\.48\.nextn\.hc_head_down\.weight   Q8_0
+blk\.48\.attn_(q|k|output)\.weight     Q8_0
+blk\.48\.hc_attn_down\.weight          Q8_0
+blk\.48\.ffn_(gate|up)_shexp\.weight   Q8_0

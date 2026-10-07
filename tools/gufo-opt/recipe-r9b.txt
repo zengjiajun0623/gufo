@@ -1,0 +1,11 @@
+# gufo-opt r9b: r9a + hc *_up (10240 rows, K=320) and shared expert in Q4_1. Use with --imatrix.
+attn_output\.weight   Q8_0
+^output\.weight       Q4_1
+token_embd            KEEP
+ple_                  KEEP
+hc_.*_down            KEEP   # 320 rows: needs a split-K kernel first
+hc_.*_up\.weight      Q4_1
+ffn_(gate|up|down)_shexp  Q4_1
+_exps                 KEEP
+attn_(qkv|q|k|v|gate)\.weight  Q4_1
+ssm_out\.weight       Q4_1
