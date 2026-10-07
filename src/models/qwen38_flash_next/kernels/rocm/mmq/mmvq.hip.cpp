@@ -151,6 +151,7 @@ static constexpr __device__ vec_dot_q_hip_t get_vec_dot_q_hip(ggml_type type) {
         case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1;
         case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1;
         case GGML_TYPE_IQ4_KS:  return vec_dot_iq4_ks_q8_1;
+        case GGML_TYPE_IQ4_NL:  return vec_dot_iq4_nl_q8_1;
         default:                return nullptr;
     }
 }
@@ -163,6 +164,7 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_Q4_K:    return VDR_Q4_K_Q8_1_MMVQ;
         case GGML_TYPE_Q5_K:    return VDR_Q5_K_Q8_1_MMVQ;
         case GGML_TYPE_IQ4_KS:  return VDR_IQ4_KS_Q8_1_MMVQ;
+        case GGML_TYPE_IQ4_NL:  return VDR_IQ4_NL_Q8_1_MMVQ;
         default:                return 1;
     }
 }
@@ -223,7 +225,7 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
     // Row-scaled formats: row_offsets count rows, not blocks.
     constexpr bool row_meta = ggml_type_row_meta(type);
     const size_t row_bytes =
-        row_meta ? sizeof(float) + size_t(blocks_per_row_x) * ggml_type_size(type) : 0;
+        row_meta ? sizeof(float) + size_t(blocks_per_row_x) * ggml_row_meta_block_bytes(type) : 0;
 
     for (int kbx = threadIdx.x / (qi/vdr); !invalid_id && kbx < blocks_per_row_x; kbx += blocks_per_iter) {
         const int kby = kbx * (qk/QK8_1);
@@ -378,7 +380,7 @@ __launch_bounds__(64) static __global__
           const int wrow = expert * rows + min(row0 + r, rows - 1);
           if constexpr (ggml_type_row_meta(type)) {
             const size_t row_bytes = sizeof(float) +
-                                     size_t(blocks_per_row) * ggml_type_size(type);
+                                     size_t(blocks_per_row) * ggml_row_meta_block_bytes(type);
             sum[t][r] += dot((const char*)weights + size_t(wrow) * row_bytes, x,
                              kb, kqs);
           } else {
@@ -643,6 +645,23 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
             break;
           }
             launch_moe<GGML_TYPE_Q5_1>(weights, input, ids, output, k, rows, tokens,
+                                          experts_used, input_stride, stream);
+            break;
+        case GGML_TYPE_IQ4_NL:
+          // gufo-opt r15: IQ4_NL down projection, same tiling as Q5_1.
+          if (k == 640 && experts_used == 1 && tokens > 1) {
+            if (tokens > 20) {
+              launch_moe<GGML_TYPE_IQ4_NL, 8>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream);
+            } else {
+              launch_moe<GGML_TYPE_IQ4_NL, 4>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream);
+            }
+            break;
+          }
+            launch_moe<GGML_TYPE_IQ4_NL>(weights, input, ids, output, k, rows, tokens,
                                           experts_used, input_stride, stream);
             break;
         case GGML_TYPE_Q4_1:

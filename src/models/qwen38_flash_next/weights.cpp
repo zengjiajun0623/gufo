@@ -151,7 +151,7 @@ struct Binder {
                         GgmlType::kQ5_1, GgmlType::kQ4_1};
     const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
                           GgmlType::kQ5_1, GgmlType::kQ8_0, GgmlType::kQ4_1,
-                          GgmlType::kIQ4_KS};
+                          GgmlType::kIQ4_KS, GgmlType::kIQ4_NL};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);

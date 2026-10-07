@@ -810,6 +810,10 @@ struct ggml_hip_type_traits<GGML_TYPE_IQ4_KS> {
 constexpr __host__ __device__ bool ggml_type_row_meta(ggml_type type) {
     return type == GGML_TYPE_IQ4_KS;
 }
+// Block bytes of a row-scaled format (the float row header excluded).
+constexpr __host__ __device__ int ggml_row_meta_block_bytes(ggml_type type) {
+    return type == GGML_TYPE_IQ4_KS ? 136 : 0;
+}
 
 template<>
 struct ggml_hip_type_traits<GGML_TYPE_IQ3_S> {

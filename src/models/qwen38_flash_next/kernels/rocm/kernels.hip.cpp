@@ -3850,6 +3850,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
          : kType == WeightType::kQ4_1 ? (k / 32) * 20
+         : kType == WeightType::kIQ4_NL ? (k / 32) * 18
          : kType == WeightType::kIQ4_KS
              ? sizeof(float) + (k / 256) * 136
                                       : (k / 32) * sizeof(Q8_0Block);
@@ -3920,7 +3921,9 @@ __launch_bounds__(256) __global__
   // IQ4_KS stages like Q5_1 too, with (d, 0) and its table bit as "high".
   constexpr bool kQ41 = kType == WeightType::kQ4_1;
   constexpr bool kIQ4KS = kType == WeightType::kIQ4_KS;
-  constexpr bool kQ5 = kType == WeightType::kQ5_1 || kQ41 || kIQ4KS;
+  constexpr bool kIQ4NL = kType == WeightType::kIQ4_NL;  // table half 0
+  constexpr bool kLut = kIQ4KS || kIQ4NL;
+  constexpr bool kQ5 = kType == WeightType::kQ5_1 || kQ41 || kLut;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
@@ -4041,7 +4044,19 @@ __launch_bounds__(256) __global__
   const auto fetch_stage = [&](int kb0) {
 #pragma unroll
     for (int u = 0; u < kWaveRowTiles; ++u) {
-      if constexpr (kIQ4KS) {
+      if constexpr (kIQ4NL) {
+        // block_iq4_nl is 18 bytes (d, 16 nibble bytes): 2-byte aligned.
+        const int kb = kb0 + f_c;
+        const auto* blk =
+            reinterpret_cast<const std::uint16_t*>(f_ptr[u] + (kb * 18));
+        std::uint32_t q[4];
+#pragma unroll
+        for (int i = 0; i < 4; ++i)
+          q[i] = blk[1 + 2 * i] | (std::uint32_t(blk[2 + 2 * i]) << 16U);
+        f_codes[u] = make_uint4(q[0], q[1], q[2], q[3]);
+        f_high[u] = 0U;
+        f_dm[u] = blk[0];  // half2 (d, 0)
+      } else if constexpr (kIQ4KS) {
         // Row: float scale, then 136-byte blocks of 8 scale bytes and
         // 128 nibble bytes; K block kb is sub-block kb % 8 of block kb / 8.
         const int kb = kb0 + f_c;
@@ -4197,7 +4212,7 @@ __launch_bounds__(256) __global__
     }
   }
 
-  constexpr bool kSignedBytes = kQ8 || kIQ4KS;  // codes carried as v + 128
+  constexpr bool kSignedBytes = kQ8 || kLut;  // codes carried as v + 128
   const __half2 magic = __floats2half2_rn(kSignedBytes ? -1152.0F : -1024.0F,
                                           kSignedBytes ? -1152.0F : -1024.0F);
   const auto compute_stage = [&]() {
@@ -4236,7 +4251,7 @@ __launch_bounds__(256) __global__
           for (int i = 0; i < 8; ++i) {
             nib[i] = words[i] ^ 0x80808080U;
           }
-        } else if constexpr (kIQ4KS) {
+        } else if constexpr (kLut) {
           // Same nibble order as Q5_1; codes index the 16-entry table.
           const uint4 r = raw[u][kb];
           const std::uint32_t sel = s_high[(kb * BM) + row];
@@ -4812,6 +4827,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
+      return true;
+    case WeightType::kIQ4_NL:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ4_NL, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
       return true;
     case WeightType::kIQ4_KS:
       hipLaunchKernelGGL(
