@@ -1740,10 +1740,8 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
         l.ffn_gate_exps.type == GgmlType::kQ5_K    ? WeightType::kQ5_K
         : l.ffn_gate_exps.type == GgmlType::kIQ4_KS ? WeightType::kIQ4_KS
                                                     : WeightType::kQ4_K;
-    // gufo-opt r14: IQ4_KS has no paired gate/up tile yet.
     const bool gated_ok =
-        n_tokens >= 1024 && routed_tile_rows_ == 48 &&
-                gate_type != WeightType::kIQ4_KS
+        n_tokens >= 1024 && routed_tile_rows_ == 48
             ? RoutedGatedF16Gemm(
                   l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
                   s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,
