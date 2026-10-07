@@ -626,10 +626,46 @@ static void launch_moe(const void* weights, const block_q8_1* input,
           rows * experts_used, rows * row_stride, rows, tokens, experts_used);
 }
 
+// gufo-opt r18 experiment: GUFO_DOWN_RPW=2|4|8|16 overrides the rows per wave
+// of the decode-time down projection (K = 640, one expert per slot row).
+template<ggml_type type>
+static void launch_down_rpw(int rpw, const void* weights, const block_q8_1* input,
+                            const int32_t* ids, float* output, int k, int rows,
+                            int tokens, int input_stride, hipStream_t stream) {
+  switch (rpw) {
+    case 2: launch_moe<type, 2>(weights, input, ids, output, k, rows, tokens, 1, input_stride, stream); break;
+    case 4: launch_moe<type, 4>(weights, input, ids, output, k, rows, tokens, 1, input_stride, stream); break;
+    case 8: launch_moe<type, 8>(weights, input, ids, output, k, rows, tokens, 1, input_stride, stream); break;
+    default: launch_moe<type, 16>(weights, input, ids, output, k, rows, tokens, 1, input_stride, stream); break;
+  }
+}
+
 void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
                              const block_q8_1* input, const int32_t* ids, float* output,
                              int k, int rows, int tokens, int experts_used,
                              int input_stride, hipStream_t stream) {
+    static const int down_rpw = [] {
+      const char* e = getenv("GUFO_DOWN_RPW");
+      return e ? atoi(e) : 0;
+    }();
+    if (down_rpw > 0 && k == 640 && experts_used == 1 && tokens > 1) {
+      switch (type) {
+        case GGML_TYPE_Q5_1:
+          launch_down_rpw<GGML_TYPE_Q5_1>(down_rpw, weights, input, ids, output, k, rows, tokens, input_stride, stream);
+          return;
+        case GGML_TYPE_Q4_1:
+          launch_down_rpw<GGML_TYPE_Q4_1>(down_rpw, weights, input, ids, output, k, rows, tokens, input_stride, stream);
+          return;
+        case GGML_TYPE_IQ4_NL:
+          launch_down_rpw<GGML_TYPE_IQ4_NL>(down_rpw, weights, input, ids, output, k, rows, tokens, input_stride, stream);
+          return;
+        case GGML_TYPE_Q8_0:
+          launch_down_rpw<GGML_TYPE_Q8_0>(down_rpw, weights, input, ids, output, k, rows, tokens, input_stride, stream);
+          return;
+        default:
+          break;
+      }
+    }
     switch (type) {
         case GGML_TYPE_Q5_1:
           // Down projection slots have independent inputs. Wider row tiles
