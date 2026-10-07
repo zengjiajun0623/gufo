@@ -1,6 +1,8 @@
 #include "src/models/qwen38_flash_next/cpu_ops.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -31,6 +33,27 @@ void DequantizeQ5_1(const std::uint8_t* src, float* dst, std::size_t k) {
       const int xh1 = ((blk.qh >> (j + 16)) & 1U) << 4;
       y[j] = static_cast<float>((blk.qs[j] & 0x0F) | xh0) * d + m;
       y[j + 16] = static_cast<float>((blk.qs[j] >> 4) | xh1) * d + m;
+    }
+  }
+}
+
+struct BlockQ4_1 {
+  std::uint16_t d;
+  std::uint16_t m;
+  std::uint8_t qs[16];
+};
+static_assert(sizeof(BlockQ4_1) == 20);
+
+void DequantizeQ4_1(const std::uint8_t* src, float* dst, std::size_t k) {
+  for (std::size_t b = 0; b < k / 32; ++b) {
+    BlockQ4_1 blk;
+    std::memcpy(&blk, src + b * sizeof(BlockQ4_1), sizeof(BlockQ4_1));
+    const float d = gufo::quant::Fp16ToFloat(blk.d);
+    const float m = gufo::quant::Fp16ToFloat(blk.m);
+    float* y = dst + b * 32;
+    for (int j = 0; j < 16; ++j) {
+      y[j] = static_cast<float>(blk.qs[j] & 0x0F) * d + m;
+      y[j + 16] = static_cast<float>(blk.qs[j] >> 4) * d + m;
     }
   }
 }
@@ -66,6 +89,9 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
     case GgmlType::kQ5_1:
       DequantizeQ5_1(src, out, k);
       break;
+    case GgmlType::kQ4_1:
+      DequantizeQ4_1(src, out, k);
+      break;
     case GgmlType::kIQ4_NL:
       gufo::quant::DequantizeIQ4_NL(src, out, k);
       break;
@@ -79,8 +105,10 @@ void DequantizeRow(const TensorRef& t, std::uint64_t e, std::uint64_t row,
       gufo::quant::DequantizeQ6_K(src, out, k);
       break;
     default:
-      std::memset(out, 0, k * sizeof(float));
-      break;
+      // A silent zero row once hid a missing Q4_1 case: fail loudly.
+      std::fprintf(stderr, "cpu::DequantizeRow: unsupported type %d\n",
+                   static_cast<int>(t.type));
+      std::abort();
   }
 }
 
