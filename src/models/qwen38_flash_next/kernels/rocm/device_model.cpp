@@ -3,6 +3,9 @@
 #include <hip/hip_runtime.h>
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
 #include <initializer_list>
 
 #include "src/core/hip/weight_upload.hpp"
@@ -354,6 +357,50 @@ std::unique_ptr<DeviceModel> DeviceModel::Upload(
     std::erase(m->allocations_, c.source);
     (void)hipFree(c.source);
     m->bytes_ -= c.count * sizeof(float) + kTailMargin;
+  }
+  // Draft-head vocabulary subset: copy the chosen output rows into a smaller
+  // matrix so each MTP draft step reads only those rows. Drafts stay proposals;
+  // the trunk still verifies every token, so outputs cannot change.
+  if (const char* path = std::getenv("GUFO_DRAFT_VOCAB");
+      path != nullptr && *path != 0 && m->has_mtp_) {
+    std::ifstream in(path, std::ios::binary);
+    std::vector<std::int32_t> ids;
+    for (std::int32_t id = 0; in.read(reinterpret_cast<char*>(&id), sizeof id);)
+      ids.push_back(id);
+    const auto vocab = static_cast<std::int32_t>(w.output.rows);
+    if (ids.empty() ||
+        std::any_of(ids.begin(), ids.end(),
+                    [&](std::int32_t id) { return id < 0 || id >= vocab; })) {
+      if (error_msg != nullptr)
+        *error_msg = std::string("GUFO_DRAFT_VOCAB: empty or out-of-range ids in ") + path;
+      return nullptr;
+    }
+    // Pad to a multiple of 64 rows by repeating the first id (same logit, same
+    // mapped token), so the GEMV never sees a ragged tail.
+    while (ids.size() % 64 != 0)
+      ids.push_back(ids.front());
+    const std::size_t row_bytes = w.output.RowBytes();
+    std::vector<std::uint8_t> host(ids.size() * row_bytes);
+    const auto* src = static_cast<const std::uint8_t*>(w.output.data);
+    for (std::size_t i = 0; i < ids.size(); ++i)
+      std::memcpy(host.data() + i * row_bytes,
+                  src + static_cast<std::size_t>(ids[i]) * row_bytes, row_bytes);
+    void* ptr = nullptr;
+    if (hipMalloc(&ptr, host.size() + kTailMargin) != hipSuccess ||
+        hipMemcpy(ptr, host.data(), host.size(), hipMemcpyHostToDevice) !=
+            hipSuccess ||
+        hipMemset(static_cast<std::uint8_t*>(ptr) + host.size(), 0,
+                  kTailMargin) != hipSuccess) {
+      if (error_msg != nullptr)
+        *error_msg = "GUFO_DRAFT_VOCAB: device copy failed";
+      return nullptr;
+    }
+    m->allocations_.push_back(ptr);
+    m->bytes_ += host.size() + kTailMargin;
+    m->draft_output_ = m->output_;
+    m->draft_output_.data = ptr;
+    m->draft_output_.rows = static_cast<std::uint32_t>(ids.size());
+    m->draft_vocab_ = std::move(ids);
   }
   return m;
 }

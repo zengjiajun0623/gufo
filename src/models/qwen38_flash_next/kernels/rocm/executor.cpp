@@ -1823,7 +1823,9 @@ bool Executor::CopyTrunkHidden(const Session& session, std::span<float> hidden,
 
 bool Executor::MtpHead(const DeviceMixer& head, const float* res, bool token,
                        bool candidates, std::string* error_msg) const {
-  const DeviceTensor& output = model_->output();
+  const DeviceTensor& output = model_->draft_output().empty()
+                                   ? model_->output()
+                                   : model_->draft_output();
   if (!HcMix(head, res, false, s_.mixed, nullptr, 1, error_msg) ||
       !Dense(output, s_.mixed, s_.logits, 1, error_msg)) {
     return false;
@@ -2710,11 +2712,21 @@ bool Executor::MtpForward(Session& session,
   if (!Run(session, key, graph, body, error_msg)) {
     return false;
   }
+  const auto& draft_vocab = model_->draft_vocab();
   if (output.token != nullptr) {
-    *output.token = *mtp_token_host_;
+    *output.token = draft_vocab.empty() ? *mtp_token_host_
+                                        : draft_vocab[*mtp_token_host_];
   }
   if (output.candidates != nullptr) {
     *output.candidates = *mtp_candidates_host_;
+    if (!draft_vocab.empty()) {
+      const auto count =
+          std::min<std::size_t>(draft_vocab.size(), output.candidates->ids.size());
+      for (std::size_t i = 0; i < count; ++i)
+        output.candidates->ids[i] = static_cast<
+            std::remove_reference_t<decltype(output.candidates->ids[i])>>(
+            draft_vocab[output.candidates->ids[i]]);
+    }
   }
   session.mtp_.position = pos + n;
   session.mtp_.residual_valid = !output.kv_only;
