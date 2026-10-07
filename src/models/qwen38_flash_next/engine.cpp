@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <array>
 #include <chrono>
 #include <cmath>
@@ -146,6 +147,12 @@ std::shared_ptr<Model> Model::Load(const std::string& model_path,
                 exec.max_batch, std::uint64_t{options.max_draft_tokens} + 1))
           : 1;
   exec.max_speculative = exec.max_logit_rows;
+  // dump-hidden --batch only: every prefill row returns logits and keeps its
+  // trunk residual. Serving never sets this.
+  if (const char* rows = std::getenv("GUFO_DUMP_ROWS"); rows && m->mtp_weights_) {
+    exec.max_logit_rows = exec.max_speculative = static_cast<std::uint32_t>(
+        std::clamp<long>(std::strtol(rows, nullptr, 10), 1, exec.max_batch));
+  }
   m->executor_ =
       rocm::Executor::Create(*m->device_, m->ngram_.get(), exec, error_msg);
   if (!m->executor_) {
@@ -607,6 +614,42 @@ bool Session::Feed(std::span<const std::int32_t> tokens, std::string* error_msg,
         tokens_.size() + n - std::min<std::size_t>(n, exec.max_speculative()));
     tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
   }
+  return true;
+}
+
+bool Session::DumpForward(std::span<const std::int32_t> tokens,
+                          std::vector<float>* logits,
+                          std::vector<float>* hidden,
+                          std::string* error_msg) {
+  rocm::Executor& exec = *model_->executor_;
+  const std::size_t vocab = model_->VocabSize();
+  const std::size_t hc = model_->weights_->config.HcDim();
+  if (!MtpEnabled() || tokens_.empty() || logits == nullptr || hidden == nullptr) {
+    AssignError(error_msg, "dump forward needs MTP and a synced session");
+    return false;
+  }
+  logits->resize(tokens.size() * vocab);
+  hidden->resize(tokens.size() * hc);
+  const std::size_t rows = exec.max_speculative();
+  for (std::size_t off = 0; off < tokens.size(); off += rows) {
+    const std::size_t n = std::min(rows, tokens.size() - off);
+    const auto chunk = tokens.subspan(off, n);
+    if (!DraftCatchUp(chunk[0], false, error_msg))
+      return false;
+    if (!exec.Forward(*session_, chunk, static_cast<std::uint32_t>(n),
+                      logits->data() + off * vocab,
+                      rocm::Executor::ForwardMode::kPrefill, error_msg) ||
+        !exec.CopyTrunkHidden(
+            *session_, std::span<float>(hidden->data() + off * hc, n * hc),
+            error_msg)) {
+      return false;
+    }
+    hidden_base_ = static_cast<std::uint32_t>(tokens_.size());
+    tokens_.insert(tokens_.end(), chunk.begin(), chunk.end());
+  }
+  if (!tokens.empty())
+    std::copy_n(logits->data() + (tokens.size() - 1) * vocab, vocab,
+                logits_.data());
   return true;
 }
 

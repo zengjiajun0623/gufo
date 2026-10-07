@@ -13,6 +13,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -23,6 +24,7 @@
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "src/cli/score/score.hpp"
@@ -47,6 +49,7 @@ struct DumpOptions {
   std::size_t top_k{64};
   std::size_t limit{0};
   bool reference{false};
+  std::size_t batch{0};  // >0: prefill rows in chunks (GUFO_DUMP_ROWS); no draft argmax
 };
 
 std::string ReadFile(const std::string& path) {
@@ -89,6 +92,34 @@ void EmitTopK(std::ofstream& ids_out, std::ofstream& val_out,
   }
 }
 
+struct RowStats {
+  float lse{0};
+  std::vector<std::int32_t> ids;
+  std::vector<float> lp;
+};
+
+RowStats TopKRow(std::span<const float> logits, std::size_t k) {
+  RowStats r;
+  float max_v = logits[0];
+  for (float v : logits) max_v = std::max(max_v, v);
+  double sum = 0.0;
+  for (float v : logits) sum += std::exp(static_cast<double>(v - max_v));
+  r.lse = max_v + static_cast<float>(std::log(sum));
+  const std::size_t vocab = logits.size();
+  std::vector<std::uint32_t> idx(vocab);
+  std::iota(idx.begin(), idx.end(), 0u);
+  k = std::min(k, vocab);
+  std::partial_sort(idx.begin(), idx.begin() + static_cast<std::ptrdiff_t>(k),
+                    idx.end(), [&](std::uint32_t a, std::uint32_t b) {
+                      return logits[a] != logits[b] ? logits[a] > logits[b] : a < b;
+                    });
+  for (std::size_t i = 0; i < k; ++i) {
+    r.ids.push_back(static_cast<std::int32_t>(idx[i]));
+    r.lp.push_back(logits[idx[i]] - r.lse);
+  }
+  return r;
+}
+
 int RunDumpHiddenImpl(const DumpOptions& opt) {
   if (opt.model_path.empty()) throw std::runtime_error("--model is required");
   if (opt.mtp_path.empty()) throw std::runtime_error("--mtp-model is required");
@@ -106,6 +137,10 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
   if (texts.empty()) throw std::runtime_error("corpus has no strings");
 
   std::string error;
+  if (opt.batch != 0) {
+    if (opt.reference) throw std::runtime_error("--batch excludes --reference");
+    ::setenv("GUFO_DUMP_ROWS", std::to_string(opt.batch).c_str(), 1);
+  }
   auto model = q::Model::Load(
       opt.model_path,
       q::ModelOptions{
@@ -205,7 +240,56 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
     entry["start"] = static_cast<double>(token_count);
     entry["len"] = static_cast<double>(ids.size());
     offsets.push_back(entry);
-    for (std::size_t j = 0; j + 1 < ids.size(); ++j) {
+    if (opt.batch != 0) {
+      // Row 0 comes from Sync; rows 1..n-2 from chunked prefill of ids[1..n-2],
+      // emitted per segment so host memory stays ~kSeg rows of full logits.
+      constexpr std::size_t kSeg = 256;
+      const std::size_t vocab = model->VocabSize();
+      const std::size_t hcd = model->config().HcDim();
+      const std::size_t rows = ids.size() - 1;
+      const std::int32_t none = -1;
+      const std::size_t nt = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+      std::vector<float> lg, hd;
+      for (std::size_t r0 = 0; r0 < rows;) {
+        std::size_t n;
+        if (r0 == 0) {
+          n = 1;
+          const auto l0 = session->Logits();
+          lg.assign(l0.begin(), l0.end());
+          hd = session->CopyLastHidden();
+          if (hd.size() != hcd) throw std::runtime_error("CopyLastHidden failed");
+        } else {
+          n = std::min(kSeg, rows - r0);
+          if (!session->DumpForward(std::span<const std::int32_t>(ids).subspan(r0, n),
+                                    &lg, &hd, &error))
+            throw std::runtime_error("DumpForward failed: " + error);
+        }
+        std::vector<RowStats> st(n);
+        std::vector<std::thread> pool;
+        for (std::size_t w = 0; w < nt; ++w)
+          pool.emplace_back([&, w] {
+            for (std::size_t j = w; j < n; j += nt)
+              st[j] = TopKRow(std::span<const float>(lg).subspan(j * vocab, vocab), opt.top_k);
+          });
+        for (auto& th : pool) th.join();
+        for (std::size_t j = 0; j < n; ++j) {
+          tokens_out.write(reinterpret_cast<const char*>(&ids[r0 + j + 1]), sizeof(std::int32_t));
+          for (std::size_t i = 0; i < hcd; ++i) {
+            const std::uint16_t b = ToBf16(hd[j * hcd + i]);
+            hidden_out.write(reinterpret_cast<const char*>(&b), sizeof(b));
+          }
+          topk_ids.write(reinterpret_cast<const char*>(st[j].ids.data()),
+                         static_cast<std::streamsize>(st[j].ids.size() * sizeof(std::int32_t)));
+          topk_val.write(reinterpret_cast<const char*>(st[j].lp.data()),
+                         static_cast<std::streamsize>(st[j].lp.size() * sizeof(float)));
+          lse_out.write(reinterpret_cast<const char*>(&st[j].lse), sizeof(float));
+          draft_out.write(reinterpret_cast<const char*>(&none), sizeof(none));
+        }
+        positions += n;
+        r0 += n;
+      }
+    }
+    for (std::size_t j = 0; opt.batch == 0 && j + 1 < ids.size(); ++j) {
       if (j > 0) {
         if (!session->Evaluate(ids[j], &error)) {
           throw std::runtime_error("Evaluate failed: " + error);
@@ -307,13 +391,15 @@ int RunDumpHidden(std::span<const char* const> args) {
         opt.top_k = std::stoul(std::string(need(a)));
       } else if (a == "--limit") {
         opt.limit = std::stoul(std::string(need(a)));
+      } else if (a == "--batch") {
+        opt.batch = std::stoul(std::string(need(a)));
       } else if (a == "--reference") {
         opt.reference = true;
       } else if (a == "--help" || a == "-h") {
         std::cout
             << "Usage: gufo dump-hidden --model M.gguf --mtp-model T.gguf "
                "--corpus texts.json --out DIR [--context 8192] [--top-k 64] "
-               "[--limit N] [--reference]\n";
+               "[--limit N] [--reference] [--batch ROWS]\n";
         return 0;
       } else {
         throw std::runtime_error("unknown argument: " + std::string(a));

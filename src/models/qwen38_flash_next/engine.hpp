@@ -128,6 +128,14 @@ public:
                           std::string* error_msg = nullptr);
   [[nodiscard]] bool Evaluate(std::int32_t token,
                               std::string* error_msg = nullptr);
+  /// Offline dump (gufo dump-hidden --batch): prefills `tokens` in chunks of
+  /// max_speculative rows and returns, per token, the full-vocab logits and
+  /// the trunk residual the draft block reads. Needs a model loaded with
+  /// GUFO_DUMP_ROWS (raises the logit/kept-row limit); MTP must be enabled.
+  [[nodiscard]] bool DumpForward(std::span<const std::int32_t> tokens,
+                                 std::vector<float>* logits,
+                                 std::vector<float>* hidden,
+                                 std::string* error_msg = nullptr);
   struct DecodeResult {
     std::vector<std::int32_t> tokens;
     bool stop{false};
