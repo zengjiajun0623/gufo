@@ -206,6 +206,8 @@ public:
     std::uint64_t cycles{0};
     std::uint64_t drafted{0};
     std::uint64_t accepted{0};
+    std::uint64_t lookup_cycles{0};    ///< verify passes drafted by prompt lookup
+    std::uint64_t lookup_accepted{0};  ///< lookup drafts the target kept
   };
   [[nodiscard]] const SpeculativeStats& Statistics() const noexcept {
     return stats_;
@@ -268,6 +270,11 @@ private:
   std::uint32_t hidden_base_{0};  ///< first position whose hidden row is kept
   MtpLengthController draft_length_;
   SpeculativeStats stats_;
+  /// Prompt-lookup drafting (GUFO_LOOKUP_N, 0 = off): when the last N tokens
+  /// recur earlier in the context, propose their continuation instead of MTP.
+  std::uint32_t lookup_n_{0};
+  [[nodiscard]] std::vector<std::int32_t> LookupDraft(std::int32_t anchor,
+                                                      std::size_t max) const;
   std::shared_ptr<const qwen::vision::Prompt> image_prompt_;
   [[nodiscard]] std::span<const std::uint8_t> ImageIdentity(
       std::size_t token_count) const;

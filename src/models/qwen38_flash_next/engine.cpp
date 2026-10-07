@@ -4,6 +4,7 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdio>
 #include <cstdlib>
 #include <array>
 #include <chrono>
@@ -259,6 +260,36 @@ Session::Session(std::shared_ptr<Model> model,
       draft_length_(model_->options_.max_draft_tokens,
                     model_->DecodeConcurrency()) {
   logits_.resize(model_->VocabSize());
+  if (const char* n = std::getenv("GUFO_LOOKUP_N"))
+    lookup_n_ = static_cast<std::uint32_t>(std::clamp(std::atol(n), 0L, 64L));
+}
+
+std::vector<std::int32_t> Session::LookupDraft(std::int32_t anchor,
+                                               std::size_t max) const {
+  // Virtual sequence = tokens_ + anchor. Find the most recent earlier
+  // occurrence of its last N tokens and return what followed (up to max).
+  const std::size_t n = lookup_n_;
+  const std::size_t len = tokens_.size() + 1;
+  if (n == 0 || max == 0 || len < n + 2)
+    return {};
+  const auto at = [&](std::size_t i) {
+    return i < tokens_.size() ? tokens_[i] : anchor;
+  };
+  const std::size_t key = len - n;  // suffix starts here
+  for (std::size_t s = key; s-- > 0;) {
+    if (at(s + n - 1) != anchor)
+      continue;
+    std::size_t i = 0;
+    while (i < n && at(s + i) == at(key + i))
+      ++i;
+    if (i != n)
+      continue;
+    std::vector<std::int32_t> out;
+    for (std::size_t j = s + n; j < len && out.size() < max; ++j)
+      out.push_back(at(j));
+    return out;
+  }
+  return {};
 }
 
 Session::~Session() = default;
@@ -714,6 +745,7 @@ struct Session::PendingDecode {
   std::uint64_t draft_rng{0};
   MtpCandidateLogits candidates;
   std::int32_t draft{0};
+  bool lookup{false};
 };
 
 void Session::AppendDraft(PendingDecode& pending) {
@@ -763,6 +795,26 @@ bool Session::PrepareDecode(const DecodeRequest& request,
   if (is_stop(anchor)) {
     result->stop = true;
     return true;
+  }
+  // Prompt lookup: greedy, single-session path only. The draft block still
+  // consumes the anchor (kv only) so FinishDecode's rewind/replay is unchanged.
+  if (lookup_n_ != 0 && MtpEnabled() && !defer_head && !batch_drafts &&
+      cap > 1 && sampler.config().temperature == 0.0F &&
+      !sampler.config().uses_random_sampling()) {
+    auto drafts = LookupDraft(anchor, cap - 1);
+    if (!drafts.empty()) {
+      if (!DraftCatchUp(anchor, false, error_msg))
+        return false;
+      pending->chain = {anchor};
+      pending->chain.insert(pending->chain.end(), drafts.begin(), drafts.end());
+      pending->base = static_cast<std::uint32_t>(tokens_.size());
+      pending->width = pending->chain.size();
+      pending->speculative = true;
+      pending->gpu_greedy = true;
+      pending->gpu_verification = true;
+      pending->lookup = true;
+      return true;
+    }
   }
   if (!MtpEnabled() || width < 2) {
     if (MtpEnabled() && !defer_head &&
@@ -929,7 +981,19 @@ bool Session::FinishDecode(const DecodeRequest& request,
   stats_.accepted += keep - 1;
   // A target stop ends the request; it does not classify the remaining
   // proposals as failed predictions.
-  draft_length_.Observe(keep - 1, result->stop ? keep - 1 : k - 1, base);
+  if (pending.lookup) {
+    stats_.lookup_cycles += 1;
+    stats_.lookup_accepted += keep - 1;
+    if (stats_.lookup_cycles % 500 == 0)
+      std::fprintf(stderr, "gufo lookup: cycles %llu accepted %llu | all cycles %llu drafted %llu accepted %llu\n",
+                   static_cast<unsigned long long>(stats_.lookup_cycles),
+                   static_cast<unsigned long long>(stats_.lookup_accepted),
+                   static_cast<unsigned long long>(stats_.cycles),
+                   static_cast<unsigned long long>(stats_.drafted),
+                   static_cast<unsigned long long>(stats_.accepted));
+  } else {
+    draft_length_.Observe(keep - 1, result->stop ? keep - 1 : k - 1, base);
+  }
 
   // The next call knows the next sampled anchor. Defer draft catch-up until
   // then, retaining this session's target hidden rows across interleaving.
