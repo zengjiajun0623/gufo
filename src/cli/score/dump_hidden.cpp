@@ -129,6 +129,8 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
   std::optional<q::ModelWeights> ref_weights;
   std::unique_ptr<q::NgramTable> ref_ngram;
   q::MtpWeights ref_mtp;
+  // ref_mtp points into this mapping: keep the reader open while it is used.
+  std::unique_ptr<gufo::core::GgufReader> mtp_reader;
   bool have_ref = false;
   if (opt.reference) {
     ref_reader = gufo::core::GgufReader::OpenFile(opt.model_path, &error);
@@ -143,8 +145,7 @@ int RunDumpHiddenImpl(const DumpOptions& opt) {
           t.rows, c.ple_head_dim, t.type, &error);
       if (!ref_ngram) throw std::runtime_error("n-gram table failed: " + error);
     }
-    std::unique_ptr<gufo::core::GgufReader> mtp_reader =
-        gufo::core::GgufReader::OpenFile(opt.mtp_path, &error);
+    mtp_reader = gufo::core::GgufReader::OpenFile(opt.mtp_path, &error);
     if (!mtp_reader) throw std::runtime_error("mtp open failed: " + error);
     auto mtp = q::MtpWeights::Bind(*mtp_reader, ref_weights->config, &error);
     if (!mtp) throw std::runtime_error("mtp bind failed: " + error);
