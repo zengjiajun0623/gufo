@@ -3849,6 +3849,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
   return kType == WeightType::kQ4_K   ? (k / 256) * sizeof(Q4KBlock)
          : kType == WeightType::kQ5_K ? (k / 256) * kQ5KBlockBytes
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
+         : kType == WeightType::kQ4_1 ? (k / 32) * 20
                                       : (k / 32) * sizeof(Q8_0Block);
 }
 
@@ -3898,7 +3899,9 @@ __launch_bounds__(256) __global__
   static_assert(BK == 2, "one stage is one 32-byte Q4_K nibble group");
   constexpr int kTokTiles = BN / 16;
   constexpr int kWaveRowTiles = BM / 128;  // 16-row tiles per wave
-  constexpr bool kQ5 = kType == WeightType::kQ5_1;
+  // gufo-opt r14: Q4_1 runs the Q5_1 path with a zero high-bit word.
+  constexpr bool kQ41 = kType == WeightType::kQ4_1;
+  constexpr bool kQ5 = kType == WeightType::kQ5_1 || kQ41;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
   constexpr bool kKQuant = kType == WeightType::kQ4_K || kQ5K;
@@ -4019,7 +4022,15 @@ __launch_bounds__(256) __global__
   const auto fetch_stage = [&](int kb0) {
 #pragma unroll
     for (int u = 0; u < kWaveRowTiles; ++u) {
-      if constexpr (kQ5) {
+      if constexpr (kQ41) {
+        // block_q4_1 is 20 bytes: d|m then 16 nibble bytes, 4-byte aligned.
+        const int kb = kb0 + f_c;
+        const auto* words =
+            reinterpret_cast<const std::uint32_t*>(f_ptr[u]) + (kb * 5);
+        f_dm[u] = words[0];
+        f_codes[u] = make_uint4(words[1], words[2], words[3], words[4]);
+        f_high[u] = 0U;
+      } else if constexpr (kQ5) {
         const int kb = kb0 + f_c;
         const auto* words = reinterpret_cast<const uint2*>(f_ptr[u]) + (kb * 3);
         const uint2 w0 = words[0];
@@ -4750,6 +4761,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
       }
     case WeightType::kQ5_1:
       hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ5_1, kBM, BN, kBK>),
+                         grid, dim3(kThreads), 0, stream, w, x, tiles,
+                         pad_bounds, rows_in, rows_out, swiglu_gate, out,
+                         out_half, m, k, nullptr);
+      return true;
+    case WeightType::kQ4_1:
+      hipLaunchKernelGGL((RoutedF16GEMMKernel<WeightType::kQ4_1, kBM, BN, kBK>),
                          grid, dim3(kThreads), 0, stream, w, x, tiles,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);

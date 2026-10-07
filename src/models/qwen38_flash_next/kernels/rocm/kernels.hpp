@@ -39,6 +39,7 @@ void RestoreGdnState(float* state, RollbackRows snapshots, std::uint32_t keep,
 enum class WeightType : std::uint32_t {
   kF32 = 0,
   kF16 = 1,
+  kQ4_1 = 3,
   kQ5_1 = 7,
   kQ8_0 = 8,
   kQ4_K = 12,

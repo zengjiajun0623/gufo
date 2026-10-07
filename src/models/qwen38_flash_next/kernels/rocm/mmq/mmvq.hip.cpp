@@ -627,6 +627,23 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
             launch_moe<GGML_TYPE_Q5_1>(weights, input, ids, output, k, rows, tokens,
                                           experts_used, input_stride, stream);
             break;
+        case GGML_TYPE_Q4_1:
+          // gufo-opt r14: Q4_1 down projection, same tiling as Q5_1.
+          if (k == 640 && experts_used == 1 && tokens > 1) {
+            if (tokens > 20) {
+              launch_moe<GGML_TYPE_Q4_1, 8>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream);
+            } else {
+              launch_moe<GGML_TYPE_Q4_1, 4>(
+                  weights, input, ids, output, k, rows, tokens, experts_used,
+                  input_stride, stream);
+            }
+            break;
+          }
+            launch_moe<GGML_TYPE_Q4_1>(weights, input, ids, output, k, rows, tokens,
+                                          experts_used, input_stride, stream);
+            break;
         case GGML_TYPE_Q8_0:
           // Down projection slots have independent inputs. Four rows reuse
           // each short input across more weights without changing its sum.

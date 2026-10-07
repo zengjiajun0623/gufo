@@ -192,6 +192,33 @@ Experts MakeQ5_1(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+/// Random Q4_1 blocks: d, m and 16 nibble bytes (gufo-opt r14).
+Experts MakeQ4_1(std::size_t e, std::size_t m, std::size_t k,
+                 std::uint32_t seed) {
+  Experts w;
+  const std::size_t blocks = e * m * (k / 32);
+  w.packed.resize(blocks * 20);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    std::uint8_t* blk = w.packed.data() + b * 20;
+    const __half d = __float2half(Uniform(&seed, 0.02F) + 0.03F);
+    const __half mn = __float2half(Uniform(&seed, 0.5F));
+    std::memcpy(blk, &d, 2);
+    std::memcpy(blk + 2, &mn, 2);
+    std::uint8_t* qs = blk + 4;
+    for (int i = 0; i < 16; ++i) {
+      qs[i] = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
+    }
+    const float df = __half2float(d);
+    const float mf = __half2float(mn);
+    for (int j = 0; j < 32; ++j) {
+      const int code = j < 16 ? (qs[j] & 0xF) : (qs[j - 16] >> 4);
+      w.values[b * 32 + j] = df * static_cast<float>(code) + mf;
+    }
+  }
+  return w;
+}
+
 /// Random Q8_0 blocks: d and 32 signed codes.
 Experts MakeQ8_0(std::size_t e, std::size_t m, std::size_t k,
                  std::uint32_t seed) {
@@ -231,6 +258,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       type == q::WeightType::kQ4_K   ? MakeQ4K(experts, m, k, seed)
       : type == q::WeightType::kQ5_K ? MakeQ5K(experts, m, k, seed)
       : type == q::WeightType::kQ5_1 ? MakeQ5_1(experts, m, k, seed)
+      : type == q::WeightType::kQ4_1 ? MakeQ4_1(experts, m, k, seed)
                                      : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
@@ -277,6 +305,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   const auto mmq_raw = type == q::WeightType::kQ4_K   ? qfn_mmq_q4_K_moe_raw
                        : type == q::WeightType::kQ5_K ? qfn_mmq_q5_K_moe_raw
                        : type == q::WeightType::kQ5_1 ? qfn_mmq_q5_1_moe_raw
+                       : type == q::WeightType::kQ4_1 ? qfn_mmq_q4_1_moe_raw
                                                       : qfn_mmq_q8_0_moe_raw;
   const int rc =
       mmq_raw(d_w, d_x, d_ids, d_mmq, static_cast<int>(m), static_cast<int>(k),
@@ -453,6 +482,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
   std::cout << (type == q::WeightType::kQ4_K   ? "Q4_K"
                 : type == q::WeightType::kQ5_K ? "Q5_K"
                 : type == q::WeightType::kQ5_1 ? "Q5_1"
+                : type == q::WeightType::kQ4_1 ? "Q4_1"
                                                : "Q8_0")
             << " routed n=" << n_tokens << " used=" << used << " E=" << experts
             << " m=" << m << " k=" << k << ": worst |F16 - MMQ| " << r.vs_mmq
@@ -487,7 +517,8 @@ void CheckVectorGrouping(bool down = false) {
   constexpr std::size_t guard = 16;
   constexpr float poison = -1234567.0F;
   const std::vector<q::WeightType> formats =
-      down ? std::vector{q::WeightType::kQ5_1, q::WeightType::kQ8_0}
+      down ? std::vector{q::WeightType::kQ5_1, q::WeightType::kQ8_0,
+                         q::WeightType::kQ4_1}
            : std::vector{q::WeightType::kQ4_K, q::WeightType::kQ5_K,
                          q::WeightType::kQ5_1, q::WeightType::kQ8_0};
   std::vector<float> x(tokens * cols);
@@ -513,9 +544,11 @@ void CheckVectorGrouping(bool down = false) {
     std::vector<Experts> weights, paired_weights;
     if (down) {
       weights = {MakeQ5_1(experts, rows, cols, 17),
-                 MakeQ8_0(experts, rows, cols, 23)};
+                 MakeQ8_0(experts, rows, cols, 23),
+                 MakeQ4_1(experts, rows, cols, 29)};
       paired_weights = {MakeQ5_1(experts, rows, cols, 79),
-                        MakeQ8_0(experts, rows, cols, 83)};
+                        MakeQ8_0(experts, rows, cols, 83),
+                        MakeQ4_1(experts, rows, cols, 89)};
     } else {
       weights = {
           MakeQ4K(experts, rows, cols, 11), MakeQ5K(experts, rows, cols, 13),
@@ -721,6 +754,17 @@ int main() {
                 64)) &&
          ok;
     ok = Ok(Run(q::WeightType::kQ5_1, 97, 1, 8, 129, 640, 0x51516464U, 64)) &&
+         ok;
+    // gufo-opt r14: Q4_1 down view, 48/64/16-row tiles and a ragged batch.
+    ok = Ok(Run(q::WeightType::kQ4_1, 3000, 1, 64, 2560, 640, 0x41414141U,
+                64)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ4_1, 3000, 1, 64, 2560, 640, 0x41410048U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ4_1, 300, 1, 64, 2560, 640, 0x41410016U,
+                16)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kQ4_1, 97, 1, 8, 129, 640, 0x41416464U, 64)) &&
          ok;
     // Q5_K gate/up view (one layer).
     ok = Ok(Run(q::WeightType::kQ5_K, 300, 10, 64, 640, 2560, 0x5A5A0001U)) &&
