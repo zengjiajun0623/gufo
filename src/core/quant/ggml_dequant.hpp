@@ -121,6 +121,7 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kIQ2_XXS:
     case core::GgmlType::kIQ4_XS:
     case core::GgmlType::kIQ4_KS:
+    case core::GgmlType::kIQ4_K:
     case core::GgmlType::kIQ3_S:
     case core::GgmlType::kQ3_K:
     case core::GgmlType::kQ4_K:

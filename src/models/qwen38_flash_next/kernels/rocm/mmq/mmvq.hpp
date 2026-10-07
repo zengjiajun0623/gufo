@@ -16,7 +16,7 @@ struct MoeBatchGroup {
 // Tuned routed-vector batch limits for gfx1151.
 constexpr __host__ __device__ int mmvq_moe_max_batch(ggml_type type) {
     return type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K ||
-           type == GGML_TYPE_IQ4_KS ? 4 : 8;
+           type == GGML_TYPE_IQ4_KS || type == GGML_TYPE_IQ4_K ? 4 : 8;
 }
 
 void mul_mat_vec_q8_dispatch(const void* weights, const void* gate,

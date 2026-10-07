@@ -167,6 +167,7 @@ enum ggml_type {
     GGML_TYPE_NVFP4   = 40,
     GGML_TYPE_Q1_0    = 41,
     GGML_TYPE_COUNT   = 42,
+    GGML_TYPE_IQ4_K   = 139,  // gufo-opt: ik_llama.cpp id
     GGML_TYPE_IQ4_KS  = 144,  // gufo-opt: ik_llama.cpp id, outside COUNT
 };
 
@@ -253,6 +254,7 @@ inline size_t ggml_type_size(enum ggml_type t) {
         case GGML_TYPE_IQ4_NL:  return 18;
         case GGML_TYPE_IQ4_XS:  return 136;
         case GGML_TYPE_IQ4_KS:  return 136;  // + a float per row
+        case GGML_TYPE_IQ4_K:   return 144;
         case GGML_TYPE_MXFP4:   return 17;
         case GGML_TYPE_NVFP4:   return 18;
         case GGML_TYPE_Q1_0:    return 36;
@@ -297,6 +299,7 @@ inline int64_t ggml_blck_size(enum ggml_type t) {
         case GGML_TYPE_IQ1_M:
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_KS:
+        case GGML_TYPE_IQ4_K:
         case GGML_TYPE_Q1_0:
             return 256;
         default:

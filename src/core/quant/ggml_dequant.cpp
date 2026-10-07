@@ -213,6 +213,9 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kIQ4_XS:
       block_bytes = sizeof(block_iq4_xs);
       break;
+    case core::GgmlType::kIQ4_K:
+      block_bytes = 144;
+      break;
     case core::GgmlType::kIQ4_KS:
       // One row: `elements` is the row width; the row starts with a float.
       if (elements % 256 != 0) {

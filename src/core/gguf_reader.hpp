@@ -38,6 +38,7 @@ enum class GgmlType : std::uint16_t {
   kIQ4_NL = 20,
   kIQ3_S = 21,
   kIQ4_XS = 23,
+  kIQ4_K = 139,   // ik_llama.cpp: 144-byte blocks, 16-wide scales
   kIQ4_KS = 144,  // ik_llama.cpp: float row scale, then 136-byte blocks
   kI32 = 26,
   kBF16 = 30,
@@ -77,6 +78,8 @@ enum class GgmlType : std::uint16_t {
       return "IQ2_XXS";
     case GgmlType::kIQ4_KS:
       return "IQ4_KS";
+    case GgmlType::kIQ4_K:
+      return "IQ4_K";
     case GgmlType::kIQ4_NL:
       return "IQ4_NL";
     case GgmlType::kIQ3_S:

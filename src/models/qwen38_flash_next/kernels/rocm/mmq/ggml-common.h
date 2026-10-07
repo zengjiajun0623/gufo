@@ -393,6 +393,17 @@ typedef struct {
     uint8_t qs[QK_K/2];
 } block_iq4_ks;
 static_assert(sizeof(block_iq4_ks) == QK_K/32 + QK_K/2, "wrong iq4_ks block size/padding");
+
+// gufo-opt: ik_llama.cpp IQ4_K. Two 6-bit signed scales and two table bits
+// (in `extra`) per 32-element sub-block: elements 0-15 / 16-31.
+typedef struct {
+    ggml_half d;
+    uint16_t extra;
+    uint8_t  scales_h[QK_K/64];
+    uint8_t  scales_l[QK_K/32];
+    uint8_t  qs[QK_K/2];
+} block_iq4_k;
+static_assert(sizeof(block_iq4_k) == 144, "wrong iq4_k block size/padding");
 static_assert(sizeof(block_iq4_xs) == sizeof(ggml_half) + sizeof(uint16_t) + QK_K/64 + QK_K/2, "wrong iq4_xs block size/padding");
 
 #endif // GGML_COMMON_DECL

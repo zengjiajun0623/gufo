@@ -255,6 +255,43 @@ Experts MakeIQ4KS(std::size_t e, std::size_t m, std::size_t k,
   return w;
 }
 
+/// Random IQ4_K blocks (ik_llama.cpp): d, extra (table bit per 16 values),
+/// 6-bit signed scales per 16 values, 128 nibble bytes (gufo-opt r17).
+Experts MakeIQ4K(std::size_t e, std::size_t m, std::size_t k,
+                 std::uint32_t seed) {
+  static constexpr std::int8_t kValues[32] = {
+      -127, -104, -83, -65, -49, -35, -22, -10, 1,  13, 25, 38, 53, 69, 89, 113,
+      -123, -100, -79, -61, -45, -31, -18, -6,  5,  17, 29, 42, 57, 73, 93, 117};
+  Experts w;
+  const std::size_t blocks = e * m * (k / 256);
+  w.packed.resize(blocks * 144);
+  w.values.resize(e * m * k);
+  for (std::size_t b = 0; b < blocks; ++b) {
+    std::uint8_t* blk = w.packed.data() + b * 144;
+    for (int i = 2; i < 144; ++i)
+      blk[i] = static_cast<std::uint8_t>(NextRandom(&seed) & 0xFF);
+    const __half d = __float2half((Uniform(&seed, 1.0F) + 1.5F) * 5e-5F);
+    std::memcpy(blk, &d, 2);
+    const float df = __half2float(d);
+    std::uint16_t extra;
+    std::memcpy(&extra, blk + 2, 2);
+    for (int ib = 0; ib < 8; ++ib) {
+      const int sh = blk[4 + ib / 2] >> (4 * (ib % 2));
+      const int ls1 = ((blk[8 + ib] & 0xF) | ((sh << 4) & 0x30)) - 32;
+      const int ls2 = ((blk[8 + ib] >> 4) | ((sh << 2) & 0x30)) - 32;
+      const std::int8_t* v1 = kValues + (((extra >> (2 * ib)) & 1) << 4);
+      const std::int8_t* v2 = kValues + (((extra >> (2 * ib + 1)) & 1) << 4);
+      const std::uint8_t* qs = blk + 16 + 16 * ib;
+      float* y = w.values.data() + b * 256 + ib * 32;
+      for (int j = 0; j < 16; ++j) {
+        y[j] = df * static_cast<float>(ls1) * static_cast<float>(v1[qs[j] & 0xF]);
+        y[j + 16] = df * static_cast<float>(ls2) * static_cast<float>(v2[qs[j] >> 4]);
+      }
+    }
+  }
+  return w;
+}
+
 /// Random IQ4_NL blocks: d and 16 nibble bytes into kvalues_iq4nl.
 Experts MakeIQ4NL(std::size_t e, std::size_t m, std::size_t k,
                   std::uint32_t seed) {
@@ -322,6 +359,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       : type == q::WeightType::kQ4_1 ? MakeQ4_1(experts, m, k, seed)
       : type == q::WeightType::kIQ4_KS ? MakeIQ4KS(experts, m, k, seed)
       : type == q::WeightType::kIQ4_NL ? MakeIQ4NL(experts, m, k, seed)
+      : type == q::WeightType::kIQ4_K ? MakeIQ4K(experts, m, k, seed)
                                      : MakeQ8_0(experts, m, k, seed);
   const std::size_t slots = n_tokens * used;
   // Skewed top-k without replacement: the low experts see most rows.
@@ -376,7 +414,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                                  const std::int32_t* ids, float* out, int mm,
                                  int kk, int nt, int ne, int nu,
                                  hipStream_t s) {
-    return type == q::WeightType::kIQ4_KS
+    return type == q::WeightType::kIQ4_KS || type == q::WeightType::kIQ4_K
                ? qfn_mmq_moe_vec(static_cast<int>(type), w, x, ids, out, mm,
                                  kk, nt, ne, nu, s)
                : mmq_raw(w, x, ids, out, mm, kk, nt, ne, nu, s);
@@ -468,7 +506,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
 
   if (tile_rows == 48 &&
       (type == q::WeightType::kQ4_K || type == q::WeightType::kQ5_K ||
-       type == q::WeightType::kIQ4_KS)) {
+       type == q::WeightType::kIQ4_KS || type == q::WeightType::kIQ4_K)) {
     // Different gate/up weights, with the up scale small enough that these
     // deliberately large synthetic weights do not overflow the F16 output.
     auto up = w.packed;
@@ -483,7 +521,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
       }
     }
     for (std::size_t b = 0; type != q::WeightType::kIQ4_KS && b < up.size();
-         b += block_bytes) {
+         b += type == q::WeightType::kIQ4_K ? 144 : block_bytes) {
       for (std::size_t offset : {0U, 2U}) {
         __half scale;
         std::memcpy(&scale, up.data() + b + offset, sizeof(scale));
@@ -570,6 +608,7 @@ Result Run(q::WeightType type, std::size_t n_tokens, std::size_t used,
                 : type == q::WeightType::kQ4_1 ? "Q4_1"
                 : type == q::WeightType::kIQ4_KS ? "IQ4_KS"
                 : type == q::WeightType::kIQ4_NL ? "IQ4_NL"
+                : type == q::WeightType::kIQ4_K ? "IQ4_K"
                                                : "Q8_0")
             << " routed n=" << n_tokens << " used=" << used << " E=" << experts
             << " m=" << m << " k=" << k << ": worst |F16 - MMQ| " << r.vs_mmq
@@ -608,7 +647,7 @@ void CheckVectorGrouping(bool down = false) {
                          q::WeightType::kQ4_1, q::WeightType::kIQ4_NL}
            : std::vector{q::WeightType::kQ4_K, q::WeightType::kQ5_K,
                          q::WeightType::kQ5_1, q::WeightType::kQ8_0,
-                         q::WeightType::kIQ4_KS};
+                         q::WeightType::kIQ4_KS, q::WeightType::kIQ4_K};
   std::vector<float> x(tokens * cols);
   std::uint32_t seed = 37;
   // Mix ordinary and small activations: saturated SwiGLU alone misses
@@ -643,11 +682,11 @@ void CheckVectorGrouping(bool down = false) {
       weights = {
           MakeQ4K(experts, rows, cols, 11), MakeQ5K(experts, rows, cols, 13),
           MakeQ5_1(experts, rows, cols, 17), MakeQ8_0(experts, rows, cols, 23),
-          MakeIQ4KS(experts, rows, cols, 31)};
+          MakeIQ4KS(experts, rows, cols, 31), MakeIQ4K(experts, rows, cols, 41)};
       paired_weights = {
           MakeQ4K(experts, rows, cols, 71), MakeQ5K(experts, rows, cols, 73),
           MakeQ5_1(experts, rows, cols, 79), MakeQ8_0(experts, rows, cols, 83),
-          MakeIQ4KS(experts, rows, cols, 97)};
+          MakeIQ4KS(experts, rows, cols, 97), MakeIQ4K(experts, rows, cols, 103)};
     }
     const std::size_t count = tokens * used * rows;
     const std::vector<float> dirty(count + 2 * guard, poison);
@@ -746,7 +785,8 @@ void CheckVectorGrouping(bool down = false) {
       if (formats[f] == q::WeightType::kQ4_K ||
           formats[f] == q::WeightType::kQ5_K ||
           formats[f] == q::WeightType::kQ8_0 ||
-          formats[f] == q::WeightType::kIQ4_KS) {
+          formats[f] == q::WeightType::kIQ4_KS ||
+          formats[f] == q::WeightType::kIQ4_K) {
         // Compare the fused vector path with the original GPU SwiGLU too:
         // inactive experts, nonfinite scales and a ragged last row must
         // retain their exact values and output guards.
@@ -875,6 +915,14 @@ int main() {
                 16)) &&
          ok;
     ok = Ok(Run(q::WeightType::kIQ4_NL, 97, 1, 8, 129, 640, 0x14A46464U, 64)) &&
+         ok;
+    // gufo-opt r17: IQ4_K gate/up view, 48 and 16-row tiles, ragged rows.
+    ok = Ok(Run(q::WeightType::kIQ4_K, 300, 10, 64, 640, 2560, 0x1A4B6C01U)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_K, 300, 10, 64, 640, 2560, 0x1A4B6C02U,
+                16)) &&
+         ok;
+    ok = Ok(Run(q::WeightType::kIQ4_K, 40, 4, 8, 201, 512, 0x1A4B6C03U)) &&
          ok;
     // gufo-opt r14: IQ4_KS gate/up view, 48 and 16-row tiles, ragged rows.
     ok = Ok(Run(q::WeightType::kIQ4_KS, 300, 10, 64, 640, 2560, 0x1A4B5C01U)) &&

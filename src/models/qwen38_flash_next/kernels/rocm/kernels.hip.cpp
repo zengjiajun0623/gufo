@@ -3851,6 +3851,7 @@ __device__ __forceinline__ std::size_t RoutedF16RowBytes(std::size_t k) {
          : kType == WeightType::kQ5_1 ? (k / 32) * sizeof(Q5_1Block)
          : kType == WeightType::kQ4_1 ? (k / 32) * 20
          : kType == WeightType::kIQ4_NL ? (k / 32) * 18
+         : kType == WeightType::kIQ4_K  ? (k / 256) * 144
          : kType == WeightType::kIQ4_KS
              ? sizeof(float) + (k / 256) * 136
                                       : (k / 32) * sizeof(Q8_0Block);
@@ -3922,7 +3923,10 @@ __launch_bounds__(256) __global__
   constexpr bool kQ41 = kType == WeightType::kQ4_1;
   constexpr bool kIQ4KS = kType == WeightType::kIQ4_KS;
   constexpr bool kIQ4NL = kType == WeightType::kIQ4_NL;  // table half 0
-  constexpr bool kLut = kIQ4KS || kIQ4NL;
+  // IQ4_K: separate (scale, table) for elements 0-15 and 16-31; the staged
+  // half2 is (d1, d2) and the "high" word holds both table bits.
+  constexpr bool kIQ4K = kType == WeightType::kIQ4_K;
+  constexpr bool kLut = kIQ4KS || kIQ4NL || kIQ4K;
   constexpr bool kQ5 = kType == WeightType::kQ5_1 || kQ41 || kLut;
   constexpr bool kQ5K = kType == WeightType::kQ5_K;
   constexpr bool kQ8 = kType == WeightType::kQ8_0;
@@ -4044,7 +4048,24 @@ __launch_bounds__(256) __global__
   const auto fetch_stage = [&](int kb0) {
 #pragma unroll
     for (int u = 0; u < kWaveRowTiles; ++u) {
-      if constexpr (kIQ4NL) {
+      if constexpr (kIQ4K) {
+        const int kb = kb0 + f_c;
+        const std::uint8_t* blk = f_ptr[u] + (kb >> 3) * 144;
+        const int ib = kb & 7;
+        const float d = __half2float(*reinterpret_cast<const __half*>(blk));
+        const std::uint32_t extra =
+            *reinterpret_cast<const std::uint16_t*>(blk + 2);
+        const std::uint32_t sh = blk[4 + ib / 2] >> (4 * (ib % 2));
+        const std::uint32_t sl = blk[8 + ib];
+        const int ls1 = static_cast<int>((sl & 0xFU) | ((sh << 4) & 0x30U)) - 32;
+        const int ls2 = static_cast<int>((sl >> 4) | ((sh << 2) & 0x30U)) - 32;
+        const auto* q = reinterpret_cast<const uint4*>(blk + 16 + (16 * ib));
+        f_codes[u] = *q;
+        f_high[u] = (extra >> (2 * ib)) & 3U;
+        f_dm[u] = __builtin_bit_cast(
+            std::uint32_t, __floats2half2_rn(d * static_cast<float>(ls1),
+                                             d * static_cast<float>(ls2)));
+      } else if constexpr (kIQ4NL) {
         // block_iq4_nl is 18 bytes (d, 16 nibble bytes): 2-byte aligned.
         const int kb = kb0 + f_c;
         const auto* blk =
@@ -4258,8 +4279,9 @@ __launch_bounds__(256) __global__
           const std::uint32_t words[4] = {r.x, r.y, r.z, r.w};
 #pragma unroll
           for (int i = 0; i < 4; ++i) {
-            nib[i] = Iq4kLookup(words[i] & 0x0F0F0F0FU, sel);
-            nib[4 + i] = Iq4kLookup((words[i] >> 4U) & 0x0F0F0F0FU, sel);
+            nib[i] = Iq4kLookup(words[i] & 0x0F0F0F0FU, sel & 1U);
+            nib[4 + i] =
+                Iq4kLookup((words[i] >> 4U) & 0x0F0F0F0FU, kIQ4K ? sel >> 1 : sel);
           }
         } else if constexpr (kQ5) {
           // Q5_1: K block kb's 16 bytes are chunk kb; elements 0-15 take
@@ -4295,7 +4317,14 @@ __launch_bounds__(256) __global__
         __half2 h[16];
 #pragma unroll
         for (int i = 0; i < 8; ++i) {
-          CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
+          if constexpr (kIQ4K) {
+            // (d1, d2) staged; no bias.
+            const __half2 zero2 = __floats2half2_rn(0.0F, 0.0F);
+            CodesToHalves(nib[i], magic, i < 4 ? scale2 : bias2, zero2,
+                          h[2 * i], h[2 * i + 1]);
+          } else {
+            CodesToHalves(nib[i], magic, scale2, bias2, h[2 * i], h[2 * i + 1]);
+          }
         }
         __builtin_memcpy(&a_lo[u], &h[0], 32);
         __builtin_memcpy(&a_hi[u], &h[8], 32);
@@ -4828,6 +4857,12 @@ bool LaunchRoutedF16(const void* w, WeightType type, const __half* x,
                          pad_bounds, rows_in, rows_out, swiglu_gate, out,
                          out_half, m, k, nullptr);
       return true;
+    case WeightType::kIQ4_K:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ4_K, kBM, BN, kBK>), grid,
+          dim3(kThreads), 0, stream, w, x, tiles, pad_bounds, rows_in,
+          rows_out, swiglu_gate, out, out_half, m, k, nullptr);
+      return true;
     case WeightType::kIQ4_NL:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kIQ4_NL, kBM, BN, kBK>), grid,
@@ -4875,7 +4910,7 @@ bool RoutedF16Gemm(const void* w, WeightType type, const __half* x,
                    std::size_t m, std::size_t k, hipStream_t stream) {
   const std::size_t block_elems =
       (type == WeightType::kQ4_K || type == WeightType::kQ5_K ||
-       type == WeightType::kIQ4_KS)
+       type == WeightType::kIQ4_KS || type == WeightType::kIQ4_K)
           ? 256
           : 64;
   if (m == 0 || k == 0 || k % block_elems != 0 || n_tiles == 0 ||
@@ -4921,6 +4956,12 @@ bool LaunchRoutedGatedF16(const void* gate, const void* up, WeightType type,
     case WeightType::kQ5_K:
       hipLaunchKernelGGL(
           (RoutedF16GEMMKernel<WeightType::kQ5_K, 128, BN, 2, true>), grid,
+          dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
+          rows_out, nullptr, nullptr, out, m, k, up);
+      return true;
+    case WeightType::kIQ4_K:
+      hipLaunchKernelGGL(
+          (RoutedF16GEMMKernel<WeightType::kIQ4_K, 128, BN, 2, true>), grid,
           dim3(kThreads), 0, stream, gate, x, tiles, pad_bounds, rows_in,
           rows_out, nullptr, nullptr, out, m, k, up);
       return true;

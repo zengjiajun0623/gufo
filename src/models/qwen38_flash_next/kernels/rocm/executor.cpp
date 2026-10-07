@@ -1135,7 +1135,8 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                           a.cols == b.cols && a.experts == b.experts;
   if (!MatrixRows(n_tokens) && n_used <= 32 && same_shape &&
       (a.type == GgmlType::kQ4_K || a.type == GgmlType::kQ5_K ||
-       a.type == GgmlType::kQ8_0 || a.type == GgmlType::kIQ4_KS)) {
+       a.type == GgmlType::kQ8_0 || a.type == GgmlType::kIQ4_KS ||
+       a.type == GgmlType::kIQ4_K)) {
     if (qfn_mmq_moe_gated_vec(
             static_cast<int>(a.type), a.data, b.data, x, ids, out,
             static_cast<int>(a.rows), static_cast<int>(a.cols),
@@ -1709,7 +1710,8 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   const bool wmma_experts = ExpertMatrixRows(n_tokens) &&
                             (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
                              l.ffn_gate_exps.type == GgmlType::kQ5_K ||
-                             l.ffn_gate_exps.type == GgmlType::kIQ4_KS) &&
+                             l.ffn_gate_exps.type == GgmlType::kIQ4_KS ||
+                             l.ffn_gate_exps.type == GgmlType::kIQ4_K) &&
                             l.ffn_up_exps.type == l.ffn_gate_exps.type &&
                             (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
                              l.ffn_down_exps.type == GgmlType::kQ4_1 ||
@@ -1739,6 +1741,7 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     const WeightType gate_type =
         l.ffn_gate_exps.type == GgmlType::kQ5_K    ? WeightType::kQ5_K
         : l.ffn_gate_exps.type == GgmlType::kIQ4_KS ? WeightType::kIQ4_KS
+        : l.ffn_gate_exps.type == GgmlType::kIQ4_K  ? WeightType::kIQ4_K
                                                     : WeightType::kQ4_K;
     const bool gated_ok =
         n_tokens >= 1024 && routed_tile_rows_ == 48
