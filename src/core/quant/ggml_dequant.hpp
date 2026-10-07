@@ -120,6 +120,7 @@ inline constexpr std::int8_t kValuesIq4Nl[16] = {
     case core::GgmlType::kQ2_K:
     case core::GgmlType::kIQ2_XXS:
     case core::GgmlType::kIQ4_XS:
+    case core::GgmlType::kIQ4_KS:
     case core::GgmlType::kIQ3_S:
     case core::GgmlType::kQ3_K:
     case core::GgmlType::kQ4_K:
@@ -178,6 +179,8 @@ void DequantizeQ8_0(const void* src, float* dst, std::size_t k);
 
 // Dequantize row of IQ4_NL to float
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k);
+/// One IQ4_KS row (ik_llama.cpp): a float row scale, then 136-byte blocks.
+void DequantizeIQ4_KS(const void* src, float* dst, std::size_t k);
 
 // Dequantize row of IQ4_XS to float
 void DequantizeIQ4_XS(const void* src, float* dst, std::size_t k);

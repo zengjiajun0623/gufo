@@ -718,6 +718,12 @@ bool GgufReader::ParseHeaders(std::string* error_msg) {
     const auto elements = info.ElementCount();
     const auto block = quant::QuantizedBlockElements(info.type);
     info.size_bytes = quant::EncodedSizeBytes(info.type, elements);
+    if (info.type == GgmlType::kIQ4_KS && info.dimensions.front() != 0) {
+      // Row-scaled format: every row carries its own float header.
+      info.size_bytes =
+          (elements / info.dimensions.front()) *
+          quant::QuantizedRowBytes(info.type, info.dimensions.front());
+    }
     if (!info.size_bytes || (block && info.dimensions.front() % block != 0)) {
       if (error_msg)
         *error_msg = "Invalid GGUF tensor shape or unsupported storage type: " +

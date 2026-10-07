@@ -1316,3 +1316,27 @@ struct Q4MoeFragment {
     return vec_dot_q4_K_q8_1_impl_vmmq(v, u, sc, sc + 2, dm, d8);
   }
 };
+
+// gufo-opt: ik_llama.cpp IQ4_KS (vec_dot_iq4_ks_q8_1, MIT). `vbq` is the ROW
+// start (float row scale), `kbx` the 256-block within the row; iqs 0..28
+// picks the 32-element sub-block iqs / 4.
+#define VDR_IQ4_KS_Q8_1_MMVQ 4
+
+static __device__ __forceinline__ float vec_dot_iq4_ks_q8_1(
+    const void * __restrict__ vbq, const block_q8_1 * __restrict__ bq8_1, const int & kbx, const int & iqs) {
+    const float scale = *(const float *)vbq;
+    const block_iq4_ks * bq4 = (const block_iq4_ks *)((const char *)vbq + sizeof(float)) + kbx;
+    const int ib32 = iqs/4;
+    const int32_t * q8 = (const int *)bq8_1[ib32].qs;
+    const uint8_t * q4b = bq4->qs + 16*ib32;
+    const float dl = scale * ((bq4->scales[ib32] & 254) - 127);
+    const int8_t * values = iq4k_values + ((bq4->scales[ib32] & 1) << 4);
+    int sumi = 0;
+#pragma unroll
+    for (int j = 0; j < 4; ++j) {
+        const int2 v = get_int_from_table_16(get_int_b4(q4b, j), values);
+        sumi = ggml_hip_dp4a(v.x, q8[j+0], sumi);
+        sumi = ggml_hip_dp4a(v.y, q8[j+4], sumi);
+    }
+    return dl * __low2float(bq8_1[ib32].ds) * sumi;
+}

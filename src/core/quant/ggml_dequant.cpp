@@ -213,6 +213,12 @@ std::size_t QuantizedRowBytes(core::GgmlType type,
     case core::GgmlType::kIQ4_XS:
       block_bytes = sizeof(block_iq4_xs);
       break;
+    case core::GgmlType::kIQ4_KS:
+      // One row: `elements` is the row width; the row starts with a float.
+      if (elements % 256 != 0) {
+        return 0;
+      }
+      return sizeof(float) + (elements / 256) * 136;
     case core::GgmlType::kIQ3_S:
       block_bytes = sizeof(block_iq3_s);
       break;
@@ -599,6 +605,29 @@ float Iq3sValue(const block_iq3_s& block, std::size_t index) noexcept {
 
 const std::uint32_t* Iq3sGrid() noexcept {
   return kIq3sGrid;
+}
+
+void DequantizeIQ4_KS(const void* src, float* dst, std::size_t k) {
+  static constexpr std::int8_t kValues[32] = {
+      -127, -104, -83, -65, -49, -35, -22, -10, 1,  13, 25, 38, 53, 69, 89, 113,
+      -123, -100, -79, -61, -45, -31, -18, -6,  5,  17, 29, 42, 57, 73, 93, 117};
+  const auto* bytes = static_cast<const std::uint8_t*>(src);
+  float row_scale = 0.0F;
+  std::memcpy(&row_scale, bytes, sizeof(row_scale));
+  const std::uint8_t* blk = bytes + sizeof(float);
+  for (std::size_t b = 0; b < k / 256; ++b, blk += 136) {
+    for (int ib = 0; ib < 8; ++ib) {
+      const float dl =
+          row_scale * static_cast<float>(static_cast<int>(blk[ib] & 254) - 127);
+      const std::int8_t* values = kValues + ((blk[ib] & 1) << 4);
+      const std::uint8_t* qs = blk + 8 + 16 * ib;
+      float* y = dst + b * 256 + ib * 32;
+      for (int j = 0; j < 16; ++j) {
+        y[j] = dl * static_cast<float>(values[qs[j] & 0xF]);
+        y[j + 16] = dl * static_cast<float>(values[qs[j] >> 4]);
+      }
+    }
+  }
 }
 
 void DequantizeIQ4_NL(const void* src, float* dst, std::size_t k) {

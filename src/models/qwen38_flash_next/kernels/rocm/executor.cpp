@@ -1132,7 +1132,7 @@ bool Executor::GatedExperts(const DeviceTensor& a, const DeviceTensor& b,
                           a.cols == b.cols && a.experts == b.experts;
   if (!MatrixRows(n_tokens) && n_used <= 32 && same_shape &&
       (a.type == GgmlType::kQ4_K || a.type == GgmlType::kQ5_K ||
-       a.type == GgmlType::kQ8_0)) {
+       a.type == GgmlType::kQ8_0 || a.type == GgmlType::kIQ4_KS)) {
     if (qfn_mmq_moe_gated_vec(
             static_cast<int>(a.type), a.data, b.data, x, ids, out,
             static_cast<int>(a.rows), static_cast<int>(a.cols),
@@ -1705,7 +1705,8 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
   // F16 matrix-core GEMM per (expert, row tile).
   const bool wmma_experts = ExpertMatrixRows(n_tokens) &&
                             (l.ffn_gate_exps.type == GgmlType::kQ4_K ||
-                             l.ffn_gate_exps.type == GgmlType::kQ5_K) &&
+                             l.ffn_gate_exps.type == GgmlType::kQ5_K ||
+                             l.ffn_gate_exps.type == GgmlType::kIQ4_KS) &&
                             l.ffn_up_exps.type == l.ffn_gate_exps.type &&
                             (l.ffn_down_exps.type == GgmlType::kQ5_1 ||
                              l.ffn_down_exps.type == GgmlType::kQ4_1 ||
@@ -1731,11 +1732,14 @@ bool Executor::MoeExperts(const DeviceLayer& l, const float* x, float* out,
     // Large batches pair the gate/up projections and apply SwiGLU without
     // materializing the gate. Smaller buckets favor separate projections.
     auto* up_half = reinterpret_cast<__half*>(s_.up_e);
-    const WeightType gate_type = l.ffn_gate_exps.type == GgmlType::kQ5_K
-                                     ? WeightType::kQ5_K
-                                     : WeightType::kQ4_K;
+    const WeightType gate_type =
+        l.ffn_gate_exps.type == GgmlType::kQ5_K    ? WeightType::kQ5_K
+        : l.ffn_gate_exps.type == GgmlType::kIQ4_KS ? WeightType::kIQ4_KS
+                                                    : WeightType::kQ4_K;
+    // gufo-opt r14: IQ4_KS has no paired gate/up tile yet.
     const bool gated_ok =
-        n_tokens >= 1024 && routed_tile_rows_ == 48
+        n_tokens >= 1024 && routed_tile_rows_ == 48 &&
+                gate_type != WeightType::kIQ4_KS
             ? RoutedGatedF16Gemm(
                   l.ffn_gate_exps.data, l.ffn_up_exps.data, gate_type, x_half,
                   s_.routed_tiles + routed_pair_offset_, routed_pair_tiles_,

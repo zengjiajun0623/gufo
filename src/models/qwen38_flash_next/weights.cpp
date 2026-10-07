@@ -33,6 +33,8 @@ struct Format {
       return {32, 18};
     case GgmlType::kQ4_K:
       return {256, 144};
+    case GgmlType::kIQ4_KS:
+      return {256, 136};  // plus a float per row, see RowBytes
     case GgmlType::kQ5_K:
       return {256, 176};
     case GgmlType::kQ6_K:
@@ -148,7 +150,8 @@ struct Binder {
                         GgmlType::kF32, GgmlType::kQ4_K, GgmlType::kQ5_K,
                         GgmlType::kQ5_1, GgmlType::kQ4_1};
     const auto experts = {GgmlType::kQ4_K, GgmlType::kQ5_K, GgmlType::kQ6_K,
-                          GgmlType::kQ5_1, GgmlType::kQ8_0, GgmlType::kQ4_1};
+                          GgmlType::kQ5_1, GgmlType::kQ8_0, GgmlType::kQ4_1,
+                          GgmlType::kIQ4_KS};
 
     l.hc_attn = Mixer(p + "hc_attn", c, true);
     l.hc_ffn = Mixer(p + "hc_ffn", c, true);
@@ -242,7 +245,8 @@ std::size_t TensorRef::RowBytes() const noexcept {
   if (f.block == 0 || cols % f.block != 0) {
     return 0;
   }
-  return static_cast<std::size_t>(cols / f.block) * f.bytes;
+  return static_cast<std::size_t>(cols / f.block) * f.bytes +
+         (type == GgmlType::kIQ4_KS ? sizeof(float) : 0);
 }
 
 std::optional<ModelWeights> ModelWeights::Bind(const core::GgufReader& reader,

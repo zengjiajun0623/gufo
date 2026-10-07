@@ -150,6 +150,7 @@ static constexpr __device__ vec_dot_q_hip_t get_vec_dot_q_hip(ggml_type type) {
         case GGML_TYPE_Q8_0:    return vec_dot_q8_0_q8_1;
         case GGML_TYPE_Q4_K:    return vec_dot_q4_K_q8_1;
         case GGML_TYPE_Q5_K:    return vec_dot_q5_K_q8_1;
+        case GGML_TYPE_IQ4_KS:  return vec_dot_iq4_ks_q8_1;
         default:                return nullptr;
     }
 }
@@ -161,6 +162,7 @@ static constexpr __host__ __device__ int get_vdr_mmvq(ggml_type type) {
         case GGML_TYPE_Q8_0:    return VDR_Q8_0_Q8_1_MMVQ;
         case GGML_TYPE_Q4_K:    return VDR_Q4_K_Q8_1_MMVQ;
         case GGML_TYPE_Q5_K:    return VDR_Q5_K_Q8_1_MMVQ;
+        case GGML_TYPE_IQ4_KS:  return VDR_IQ4_KS_Q8_1_MMVQ;
         default:                return 1;
     }
 }
@@ -218,6 +220,10 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
 
     // partial sum for each thread
     float tmp[c_rows_per_block] = {0.0f};
+    // Row-scaled formats: row_offsets count rows, not blocks.
+    constexpr bool row_meta = ggml_type_row_meta(type);
+    const size_t row_bytes =
+        row_meta ? sizeof(float) + size_t(blocks_per_row_x) * ggml_type_size(type) : 0;
 
     for (int kbx = threadIdx.x / (qi/vdr); !invalid_id && kbx < blocks_per_row_x; kbx += blocks_per_iter) {
         const int kby = kbx * (qk/QK8_1);
@@ -225,7 +231,12 @@ __launch_bounds__(mmvq_moe_max_batch(type) * (gated ? 64 : 32),
 
 #pragma unroll
         for (int i = 0; i < c_rows_per_block; ++i) {
-            tmp[i] += vec_dot_q_hip(vx, &y[kby], row_offsets[i] + kbx, kqs);
+            if constexpr (row_meta) {
+                tmp[i] += vec_dot_q_hip((const char*)vx + size_t(row_offsets[i]) * row_bytes,
+                                        &y[kby], kbx, kqs);
+            } else {
+                tmp[i] += vec_dot_q_hip(vx, &y[kby], row_offsets[i] + kbx, kqs);
+            }
         }
     }
 
@@ -361,13 +372,19 @@ __launch_bounds__(64) static __global__
         if (slots[t] == 0)
           continue;
 #pragma unroll
-        for (int r = 0; r < 2; ++r)
-          sum[t][r] += dot(
-              weights,
-              input + (single_request ? token : t) * input_stride +
-                  kb * (qk / QK8_1),
-              (expert * rows + min(row0 + r, rows - 1)) * blocks_per_row + kb,
-              kqs);
+        for (int r = 0; r < 2; ++r) {
+          const auto* x = input + (single_request ? token : t) * input_stride +
+                          kb * (qk / QK8_1);
+          const int wrow = expert * rows + min(row0 + r, rows - 1);
+          if constexpr (ggml_type_row_meta(type)) {
+            const size_t row_bytes = sizeof(float) +
+                                     size_t(blocks_per_row) * ggml_type_size(type);
+            sum[t][r] += dot((const char*)weights + size_t(wrow) * row_bytes, x,
+                             kb, kqs);
+          } else {
+            sum[t][r] += dot(weights, x, wrow * blocks_per_row + kb, kqs);
+          }
+        }
       }
     }
   }
@@ -595,7 +612,8 @@ static void launch_moe(const void* weights, const block_q8_1* input,
   GGML_ASSERT(k % ggml_blck_size(type) == 0 && rows > 0);
   GGML_ASSERT(tokens > 0);
   const int block_tokens = std::min(tokens, mmvq_moe_max_batch(type));
-  const int row_stride = k / ggml_blck_size(type);
+  const int row_stride =
+      ggml_type_row_meta(type) ? 1 : k / ggml_blck_size(type);
   mul_mat_vec_q_moe<type, rows_per_wave>
       <<<dim3((rows + rows_per_wave - 1) / rows_per_wave, experts_used,
               (tokens + block_tokens - 1) / block_tokens),
@@ -664,6 +682,10 @@ void mul_mat_vec_moe_dispatch(const void* weights, ggml_type type,
             launch_moe<GGML_TYPE_Q5_K>(weights, input, ids, output, k, rows, tokens,
                                           experts_used, input_stride, stream);
             break;
+        case GGML_TYPE_IQ4_KS:
+            launch_moe<GGML_TYPE_IQ4_KS>(weights, input, ids, output, k, rows, tokens,
+                                          experts_used, input_stride, stream);
+            break;
         default: GGML_ABORT("unsupported vector weight format");
     }
 }
@@ -694,6 +716,10 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
       launch_moe_grouped<GGML_TYPE_Q8_0>(gate, up, input, groups, output, k,
                                          rows, tokens, experts_used,
                                          input_stride, stream);
+    } else if (type == GGML_TYPE_IQ4_KS) {
+      launch_moe_grouped<GGML_TYPE_IQ4_KS>(gate, up, input, groups, output, k,
+                                           rows, tokens, experts_used,
+                                           input_stride, stream);
     } else {
       GGML_ASSERT(type == GGML_TYPE_Q5_K);
       launch_moe_grouped<GGML_TYPE_Q5_K>(gate, up, input, groups, output, k,
@@ -702,10 +728,15 @@ void mul_mat_vec_moe_gated(const void* gate, const void* up, ggml_type type,
     }
     return;
   }
-  const int row_stride = k / ggml_blck_size(type);
+  const int row_stride =
+      ggml_type_row_meta(type) ? 1 : k / ggml_blck_size(type);
   const dim3 grid((rows + 1) / 2, experts_used);
   const dim3 block(32, 2);
-  if (type == GGML_TYPE_Q4_K) {
+  if (type == GGML_TYPE_IQ4_KS) {
+    mul_mat_vec_q_moe<GGML_TYPE_IQ4_KS, 2, true><<<grid, block, 0, stream>>>(
+        gate, input, ids, output, k, rows, row_stride, input_stride,
+        rows * experts_used, rows * row_stride, rows, 1, experts_used, up);
+  } else if (type == GGML_TYPE_Q4_K) {
     mul_mat_vec_q_moe<GGML_TYPE_Q4_K, 2, true><<<grid, block, 0, stream>>>(
         gate, input, ids, output, k, rows, row_stride, input_stride,
         rows * experts_used, rows * row_stride, rows, 1, experts_used, up);

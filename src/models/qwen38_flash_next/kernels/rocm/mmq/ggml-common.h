@@ -384,6 +384,15 @@ typedef struct {
     uint8_t  scales_l[QK_K/64];
     uint8_t  qs[QK_K/2];
 } block_iq4_xs;
+
+// gufo-opt: ik_llama.cpp IQ4_KS. A row is a float scale then these blocks;
+// sub-block scale = row scale * ((scales[i] & 254) - 127), bit 0 picks the
+// iq4k_values half.
+typedef struct {
+    uint8_t scales[QK_K/32];
+    uint8_t qs[QK_K/2];
+} block_iq4_ks;
+static_assert(sizeof(block_iq4_ks) == QK_K/32 + QK_K/2, "wrong iq4_ks block size/padding");
 static_assert(sizeof(block_iq4_xs) == sizeof(ggml_half) + sizeof(uint16_t) + QK_K/64 + QK_K/2, "wrong iq4_xs block size/padding");
 
 #endif // GGML_COMMON_DECL
@@ -1015,6 +1024,12 @@ GGML_TABLE_END()
 // TODO: fix name to kvalues_iq4_nl
 GGML_TABLE_BEGIN(int8_t, kvalues_iq4nl, 16)
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+GGML_TABLE_END()
+
+// gufo-opt: ik_llama.cpp IQ4_K* value tables (second half shifted).
+GGML_TABLE_BEGIN(int8_t, iq4k_values, 32)
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
+    -123, -100, -79, -61, -45, -31, -18,  -6, 5, 17, 29, 42, 57, 73, 93, 117
 GGML_TABLE_END()
 
 // e2m1 values (doubled)

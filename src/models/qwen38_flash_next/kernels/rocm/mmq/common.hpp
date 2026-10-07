@@ -799,6 +799,19 @@ struct ggml_hip_type_traits<GGML_TYPE_IQ4_XS> {
 };
 
 template<>
+struct ggml_hip_type_traits<GGML_TYPE_IQ4_KS> {
+    static constexpr int qk = QK_K;
+    static constexpr int qr = QR4_XS;
+    static constexpr int qi = QI4_XS;
+};
+
+// gufo-opt: formats whose rows start with a float scale. Kernels address
+// them by row pointer and pass the block index within the row.
+constexpr __host__ __device__ bool ggml_type_row_meta(ggml_type type) {
+    return type == GGML_TYPE_IQ4_KS;
+}
+
+template<>
 struct ggml_hip_type_traits<GGML_TYPE_IQ3_S> {
     static constexpr int qk = QK_K;
     static constexpr int qr = QR3_S;
